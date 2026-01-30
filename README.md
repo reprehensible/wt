@@ -8,7 +8,8 @@ Worktrees are created under `<repo>-worktrees/` alongside your main checkout.
 ## Install
 
 ```
-go build -o wt .
+go build
+go install
 ```
 
 ## Usage
