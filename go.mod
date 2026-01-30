@@ -1,4 +1,4 @@
-module wt
+module github.com/reprehensible/wt
 
 go 1.24.0
 

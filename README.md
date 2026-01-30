@@ -1,5 +1,8 @@
 # wt
 
+[![Go](https://img.shields.io/github/go-mod/go-version/reprehensible/wt)](https://github.com/reprehensible/wt)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A CLI tool for managing git worktrees. Create, list, navigate, and delete
 worktrees from the command line or an interactive TUI.
 
@@ -7,10 +10,19 @@ Worktrees are created under `<repo>-worktrees/` alongside your main checkout.
 
 ## Install
 
+```bash
+go install github.com/reprehensible/wt@latest
 ```
-go build
-go install
+
+Or build from source:
+
+```bash
+git clone https://github.com/reprehensible/wt.git
+cd wt
+go build -o wt .
 ```
+
+Requires Go 1.24+.
 
 ## Usage
 
