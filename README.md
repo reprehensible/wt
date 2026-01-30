@@ -8,6 +8,17 @@ worktrees from the command line or an interactive TUI.
 
 Worktrees are created under `<repo>-worktrees/` alongside your main checkout.
 
+## AI Statement
+
+This repository was created entirely with Claude Code, for two reasons:
+
+ 1. Because I wanted a tool that works exactly like this one does
+ 2. Because I wanted to try out some techniques with Claude Code
+
+The big thing I wanted to try was requiring 100% test coverage. I can't really speak yet to how well it worked in terms of increasing robustness, but Claude did work pretty hard to meet the goal.
+
+Given that this is a local development tool that I might be the only user of forever, I'm not too worried about it.
+
 ## Install
 
 ```bash
