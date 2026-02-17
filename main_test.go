@@ -3874,7 +3874,7 @@ func TestIntegrationOrderByRecentCommitWithRealGit(t *testing.T) {
 	mustWriteFile(t, filepath.Join(repo, "new.txt"), "new")
 	mustRunCmd(t, repo, "git", "add", ".")
 	// Use GIT_COMMITTER_DATE to ensure different timestamps
-	cmd := exec.Command("git", "commit", "-m", "newer commit")
+	cmd := exec.Command("git", "-c", "commit.gpgsign=false", "commit", "-m", "newer commit")
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE=2099-01-01T00:00:00")
 	if out, err := cmd.CombinedOutput(); err != nil {
