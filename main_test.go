@@ -4704,7 +4704,7 @@ func TestJiraCmdSuccess(t *testing.T) {
 	var buf bytes.Buffer
 	stdout = &buf
 
-	jiraCmd([]string{"new", "PROJ-123"})
+	jiraCmd([]string{"new", "-S", "PROJ-123"})
 
 	wtPath := worktreePath(repo, "PROJ-123-fix-login")
 	if !strings.Contains(buf.String(), wtPath) {
@@ -4775,7 +4775,7 @@ func TestJiraCmdBranchOverride(t *testing.T) {
 	var buf bytes.Buffer
 	stdout = &buf
 
-	jiraCmd([]string{"new", "-b", "my-branch", "PROJ-123"})
+	jiraCmd([]string{"new", "-S", "-b", "my-branch", "PROJ-123"})
 
 	wtPath := worktreePath(repo, "my-branch")
 	if !strings.Contains(buf.String(), wtPath) {
@@ -4849,7 +4849,7 @@ func TestJiraCmdTmux(t *testing.T) {
 	var buf bytes.Buffer
 	stdout = &buf
 
-	jiraCmd([]string{"new", "-t", "PROJ-123"})
+	jiraCmd([]string{"new", "-S", "-t", "PROJ-123"})
 
 	if !tmuxCalled {
 		t.Fatalf("expected tmux to be called")
@@ -5190,7 +5190,7 @@ func TestJiraCmdTmuxError(t *testing.T) {
 		}
 	}()
 
-	jiraCmd([]string{"new", "-t", "PROJ-123"})
+	jiraCmd([]string{"new", "-S", "-t", "PROJ-123"})
 }
 
 func TestJiraCmdTrailingSlashURL(t *testing.T) {
@@ -5252,7 +5252,7 @@ func TestJiraCmdTrailingSlashURL(t *testing.T) {
 	var buf bytes.Buffer
 	stdout = &buf
 
-	jiraCmd([]string{"new", "PROJ-123"})
+	jiraCmd([]string{"new", "-S", "PROJ-123"})
 
 	if strings.Contains(gotURL, "//rest") {
 		t.Fatalf("expected trailing slash stripped, got URL %q", gotURL)
@@ -5375,7 +5375,7 @@ func TestJiraCmdNoCopyConfig(t *testing.T) {
 	var buf bytes.Buffer
 	stdout = &buf
 
-	jiraCmd([]string{"new", "-C", "PROJ-123"})
+	jiraCmd([]string{"new", "-S", "-C", "PROJ-123"})
 
 	if buf.Len() == 0 {
 		t.Fatalf("expected output")
@@ -5446,7 +5446,7 @@ func TestJiraCmdNoCopyLibs(t *testing.T) {
 	var buf bytes.Buffer
 	stdout = &buf
 
-	jiraCmd([]string{"new", "-L", "PROJ-123"})
+	jiraCmd([]string{"new", "-S", "-L", "PROJ-123"})
 
 	if buf.Len() == 0 {
 		t.Fatalf("expected output")
@@ -5497,6 +5497,29 @@ func TestJiraDispatcher(t *testing.T) {
 		jiraCmd([]string{"status", "PROJ-1"})
 		if !strings.Contains(buf.String(), "PROJ-1: Open") {
 			t.Fatalf("expected status output, got %q", buf.String())
+		}
+	})
+
+	t.Run("config routes", func(t *testing.T) {
+		oldReadFile := osReadFile
+		oldHomeDir := osUserHomeDir
+		oldOut := stdout
+		defer func() {
+			osReadFile = oldReadFile
+			osUserHomeDir = oldHomeDir
+			stdout = oldOut
+		}()
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		osReadFile = func(name string) ([]byte, error) { return nil, os.ErrNotExist }
+		// execCommand already stubbed to fail git → no repo config
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		var buf bytes.Buffer
+		stdout = &buf
+		jiraCmd([]string{"config"})
+		if !strings.Contains(buf.String(), "no config found") {
+			t.Fatalf("expected no config found, got %q", buf.String())
 		}
 	})
 
@@ -5596,11 +5619,15 @@ func TestJiraFetchIssue(t *testing.T) {
 	defer func() { jiraGet = oldGet }()
 
 	t.Run("success", func(t *testing.T) {
-		issue := jiraIssue{Key: "PROJ-1", Fields: jiraFields{Summary: "Test", Status: jiraStatus{Name: "Open"}}}
+		issue := jiraIssue{Key: "PROJ-1", Fields: jiraFields{
+			Summary:   "Test",
+			Status:    jiraStatus{Name: "Open"},
+			IssueType: jiraIssueType{Name: "Story"},
+		}}
 		body, _ := json.Marshal(issue)
 		jiraGet = func(url, user, token string) ([]byte, error) {
-			if !strings.Contains(url, "fields=summary,description,comment,status") {
-				t.Fatalf("expected status in fields, got %q", url)
+			if !strings.Contains(url, "fields=summary,description,comment,status,issuetype") {
+				t.Fatalf("expected issuetype in fields, got %q", url)
 			}
 			return body, nil
 		}
@@ -5613,6 +5640,9 @@ func TestJiraFetchIssue(t *testing.T) {
 		}
 		if got.Fields.Status.Name != "Open" {
 			t.Fatalf("expected status Open, got %q", got.Fields.Status.Name)
+		}
+		if got.Fields.IssueType.Name != "Story" {
+			t.Fatalf("expected issue type Story, got %q", got.Fields.IssueType.Name)
 		}
 	})
 
@@ -5746,10 +5776,16 @@ func TestJiraStatusCmdShow(t *testing.T) {
 	oldGetenv := osGetenv
 	oldGet := jiraGet
 	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	oldExec := execCommand
 	defer func() {
 		osGetenv = oldGetenv
 		jiraGet = oldGet
 		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+		execCommand = oldExec
 	}()
 
 	osGetenv = func(key string) string {
@@ -5764,7 +5800,7 @@ func TestJiraStatusCmdShow(t *testing.T) {
 		return ""
 	}
 
-	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Test", Status: jiraStatus{Name: "Open"}}}
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Test", Status: jiraStatus{Name: "Open"}, IssueType: jiraIssueType{Name: "Story"}}}
 	issueBody, _ := json.Marshal(issue)
 	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
 		{ID: "1", Name: "Start", To: jiraStatus{Name: "In Progress"}},
@@ -5779,6 +5815,17 @@ func TestJiraStatusCmdShow(t *testing.T) {
 		return issueBody, nil
 	}
 
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress","done":"Done"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
 	var buf bytes.Buffer
 	stdout = &buf
 
@@ -5788,11 +5835,11 @@ func TestJiraStatusCmdShow(t *testing.T) {
 	if !strings.Contains(out, "PROJ-123: Open") {
 		t.Fatalf("expected status line, got %q", out)
 	}
-	if !strings.Contains(out, "In Progress") {
-		t.Fatalf("expected In Progress transition, got %q", out)
+	if !strings.Contains(out, "In Progress (working)") {
+		t.Fatalf("expected annotated In Progress transition, got %q", out)
 	}
-	if !strings.Contains(out, "Done") {
-		t.Fatalf("expected Done transition, got %q", out)
+	if !strings.Contains(out, "Done (done)") {
+		t.Fatalf("expected annotated Done transition, got %q", out)
 	}
 }
 
@@ -6237,4 +6284,3571 @@ func TestJiraStatusCmdTransitionsInvalidJSON(t *testing.T) {
 	}()
 
 	jiraStatusCmd([]string{"PROJ-123"})
+}
+
+// --- Config tests ---
+
+func TestLoadConfig(t *testing.T) {
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	oldExec := execCommand
+	defer func() {
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+		execCommand = oldExec
+	}()
+
+	t.Run("global only", func(t *testing.T) {
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == "/home/test/.config/wt/config.json" {
+				return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Jira.Status.Default["working"] != "In Progress" {
+			t.Fatalf("expected In Progress, got %q", cfg.Jira.Status.Default["working"])
+		}
+	})
+
+	t.Run("repo only", func(t *testing.T) {
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		repo := t.TempDir()
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput(repo)
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == filepath.Join(repo, ".wt.json") {
+				return []byte(`{"jira":{"status":{"default":{"review":"Code Review"}}}}`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Jira.Status.Default["review"] != "Code Review" {
+			t.Fatalf("expected Code Review, got %q", cfg.Jira.Status.Default["review"])
+		}
+	})
+
+	t.Run("merge", func(t *testing.T) {
+		repo := t.TempDir()
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput(repo)
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == "/home/test/.config/wt/config.json" {
+				return []byte(`{"jira":{"status":{"default":{"working":"In Progress","review":"In Review"}}}}`), nil
+			}
+			if name == filepath.Join(repo, ".wt.json") {
+				return []byte(`{"jira":{"status":{"default":{"review":"Code Review"}}}}`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Jira.Status.Default["working"] != "In Progress" {
+			t.Fatalf("expected In Progress, got %q", cfg.Jira.Status.Default["working"])
+		}
+		if cfg.Jira.Status.Default["review"] != "Code Review" {
+			t.Fatalf("expected Code Review (repo override), got %q", cfg.Jira.Status.Default["review"])
+		}
+	})
+
+	t.Run("neither exists", func(t *testing.T) {
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Jira.Status.Default != nil {
+			t.Fatalf("expected nil default, got %v", cfg.Jira.Status.Default)
+		}
+	})
+
+	t.Run("invalid global JSON", func(t *testing.T) {
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == "/home/test/.config/wt/config.json" {
+				return []byte(`{bad`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+		_, err := loadConfig()
+		if err == nil || !strings.Contains(err.Error(), "invalid config") {
+			t.Fatalf("expected invalid config error, got %v", err)
+		}
+	})
+
+	t.Run("invalid repo JSON", func(t *testing.T) {
+		repo := t.TempDir()
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput(repo)
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == filepath.Join(repo, ".wt.json") {
+				return []byte(`not json`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+		_, err := loadConfig()
+		if err == nil || !strings.Contains(err.Error(), "invalid config") {
+			t.Fatalf("expected invalid config error, got %v", err)
+		}
+	})
+
+	t.Run("home dir error", func(t *testing.T) {
+		osUserHomeDir = func() (string, error) { return "", errors.New("no home") }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Jira.Status.Default != nil {
+			t.Fatalf("expected nil default, got %v", cfg.Jira.Status.Default)
+		}
+	})
+
+	t.Run("git root error", func(t *testing.T) {
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == "/home/test/.config/wt/config.json" {
+				return []byte(`{"jira":{"status":{"default":{"working":"WIP"}}}}`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Jira.Status.Default["working"] != "WIP" {
+			t.Fatalf("expected WIP, got %q", cfg.Jira.Status.Default["working"])
+		}
+	})
+
+	t.Run("global read error non-ENOENT", func(t *testing.T) {
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == "/home/test/.config/wt/config.json" {
+				return nil, errors.New("permission denied")
+			}
+			return nil, os.ErrNotExist
+		}
+		_, err := loadConfig()
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Fatalf("expected permission denied error, got %v", err)
+		}
+	})
+
+	t.Run("repo read error non-ENOENT", func(t *testing.T) {
+		repo := t.TempDir()
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput(repo)
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == filepath.Join(repo, ".wt.json") {
+				return nil, errors.New("disk error")
+			}
+			return nil, os.ErrNotExist
+		}
+		_, err := loadConfig()
+		if err == nil || !strings.Contains(err.Error(), "disk error") {
+			t.Fatalf("expected disk error, got %v", err)
+		}
+	})
+}
+
+func TestMergeConfig(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		result := mergeConfig(wtConfig{}, wtConfig{})
+		if result.Jira.Status.Default == nil {
+			t.Fatalf("expected non-nil default map")
+		}
+	})
+
+	t.Run("default override", func(t *testing.T) {
+		global := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"working": "In Progress", "review": "In Review"},
+		}}}
+		repo := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"review": "Code Review"},
+		}}}
+		result := mergeConfig(global, repo)
+		if result.Jira.Status.Default["working"] != "In Progress" {
+			t.Fatalf("expected In Progress, got %q", result.Jira.Status.Default["working"])
+		}
+		if result.Jira.Status.Default["review"] != "Code Review" {
+			t.Fatalf("expected Code Review, got %q", result.Jira.Status.Default["review"])
+		}
+	})
+
+	t.Run("types override", func(t *testing.T) {
+		global := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Types: map[string]map[string]string{
+				"story": {"working": "In Development", "review": "In Review"},
+			},
+		}}}
+		repo := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Types: map[string]map[string]string{
+				"story": {"review": "Code Review"},
+			},
+		}}}
+		result := mergeConfig(global, repo)
+		if result.Jira.Status.Types["story"]["working"] != "In Development" {
+			t.Fatalf("expected In Development, got %q", result.Jira.Status.Types["story"]["working"])
+		}
+		if result.Jira.Status.Types["story"]["review"] != "Code Review" {
+			t.Fatalf("expected Code Review, got %q", result.Jira.Status.Types["story"]["review"])
+		}
+	})
+
+	t.Run("new type", func(t *testing.T) {
+		global := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Types: map[string]map[string]string{
+				"story": {"working": "In Dev"},
+			},
+		}}}
+		repo := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Types: map[string]map[string]string{
+				"bug": {"working": "Fixing"},
+			},
+		}}}
+		result := mergeConfig(global, repo)
+		if result.Jira.Status.Types["story"]["working"] != "In Dev" {
+			t.Fatalf("expected In Dev, got %q", result.Jira.Status.Types["story"]["working"])
+		}
+		if result.Jira.Status.Types["bug"]["working"] != "Fixing" {
+			t.Fatalf("expected Fixing, got %q", result.Jira.Status.Types["bug"]["working"])
+		}
+	})
+}
+
+func TestResolveStatus(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"working": "In Progress"},
+		}}}
+		got, err := resolveStatus(cfg, "Story", "working")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "In Progress" {
+			t.Fatalf("expected In Progress, got %q", got)
+		}
+	})
+
+	t.Run("type override", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"working": "In Progress"},
+			Types: map[string]map[string]string{
+				"story": {"working": "In Development"},
+			},
+		}}}
+		got, err := resolveStatus(cfg, "Story", "working")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "In Development" {
+			t.Fatalf("expected In Development, got %q", got)
+		}
+	})
+
+	t.Run("fallthrough to default", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"review": "In Review"},
+			Types: map[string]map[string]string{
+				"story": {"working": "In Development"},
+			},
+		}}}
+		got, err := resolveStatus(cfg, "Story", "review")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "In Review" {
+			t.Fatalf("expected In Review, got %q", got)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"working": "In Progress"},
+		}}}
+		_, err := resolveStatus(cfg, "Story", "unknown")
+		if err == nil || !strings.Contains(err.Error(), "no status mapping") {
+			t.Fatalf("expected no status mapping error, got %v", err)
+		}
+	})
+
+	t.Run("case insensitive type", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Types: map[string]map[string]string{
+				"dev task": {"working": "Developing"},
+			},
+		}}}
+		got, err := resolveStatus(cfg, "Dev Task", "working")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "Developing" {
+			t.Fatalf("expected Developing, got %q", got)
+		}
+	})
+
+	t.Run("empty config", func(t *testing.T) {
+		cfg := wtConfig{}
+		_, err := resolveStatus(cfg, "Story", "working")
+		if err == nil || !strings.Contains(err.Error(), "no status mapping") {
+			t.Fatalf("expected no status mapping error, got %v", err)
+		}
+	})
+}
+
+// --- jiraNewCmd auto-transition tests ---
+
+func TestJiraNewCmdAutoTransition(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldJiraPost := jiraPost
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		jiraPost = oldJiraPost
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Fix login",
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
+		{ID: "1", Name: "Start", To: jiraStatus{Name: "In Progress"}},
+	}}
+	trBody, _ := json.Marshal(tr)
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		return issueBody, nil
+	}
+	transitioned := false
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) {
+		transitioned = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error { return nil }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraNewCmd([]string{"PROJ-123"})
+
+	if !transitioned {
+		t.Fatalf("expected auto-transition to happen")
+	}
+	if !strings.Contains(buf.String(), "PROJ-123 → In Progress") {
+		t.Fatalf("expected transition message, got %q", buf.String())
+	}
+}
+
+func TestJiraNewCmdAutoTransitionNoConfig(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldJiraPost := jiraPost
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	oldErr := stderr
+	oldExit := exitFunc
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		jiraPost = oldJiraPost
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+		stderr = oldErr
+		exitFunc = oldExit
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) { return body, nil }
+
+	transitioned := false
+	jiraPost = func(url, user, token string, b []byte) ([]byte, error) {
+		transitioned = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error { return nil }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) { return nil, os.ErrNotExist }
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if transitioned {
+			t.Fatalf("expected no transition with no config")
+		}
+		// Worktree should still be created before die
+		if !strings.Contains(buf.String(), repo+"-worktrees") {
+			t.Fatalf("expected worktree path in output, got %q", buf.String())
+		}
+		if !strings.Contains(errBuf.String(), "no jira status mappings configured") {
+			t.Fatalf("expected config hint, got %q", errBuf.String())
+		}
+	}()
+
+	jiraNewCmd([]string{"PROJ-123"})
+}
+
+func TestJiraNewCmdAutoTransitionSkipFlag(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldJiraPost := jiraPost
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		jiraPost = oldJiraPost
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Fix login",
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) { return body, nil }
+
+	transitioned := false
+	jiraPost = func(url, user, token string, b []byte) ([]byte, error) {
+		transitioned = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error { return nil }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraNewCmd([]string{"-S", "PROJ-123"})
+
+	if transitioned {
+		t.Fatalf("expected no transition with -S flag")
+	}
+}
+
+func TestJiraNewCmdAutoTransitionNoMapping(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldJiraPost := jiraPost
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		jiraPost = oldJiraPost
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Fix login",
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) { return body, nil }
+
+	transitioned := false
+	jiraPost = func(url, user, token string, b []byte) ([]byte, error) {
+		transitioned = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error { return nil }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	// Config exists but no "working" key
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"review":"In Review"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraNewCmd([]string{"PROJ-123"})
+
+	if transitioned {
+		t.Fatalf("expected no transition with no working mapping")
+	}
+	// Worktree should still be created
+	if !strings.Contains(buf.String(), repo+"-worktrees") {
+		t.Fatalf("expected worktree path, got %q", buf.String())
+	}
+}
+
+func TestJiraNewCmdAutoTransitionAPIError(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldJiraPost := jiraPost
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	oldErrOut := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		jiraPost = oldJiraPost
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+		stderr = oldErrOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Fix login",
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
+		{ID: "1", Name: "Start", To: jiraStatus{Name: "In Progress"}},
+	}}
+	trBody, _ := json.Marshal(tr)
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		return issueBody, nil
+	}
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) {
+		return nil, errors.New("transition api fail")
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error { return nil }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var outBuf bytes.Buffer
+	stdout = &outBuf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+
+	jiraNewCmd([]string{"PROJ-123"})
+
+	// Worktree still created
+	if !strings.Contains(outBuf.String(), repo+"-worktrees") {
+		t.Fatalf("expected worktree path, got %q", outBuf.String())
+	}
+	// Warning on stderr
+	if !strings.Contains(errBuf.String(), "transition api fail") {
+		t.Fatalf("expected warning about transition, got %q", errBuf.String())
+	}
+}
+
+func TestJiraNewCmdAutoTransitionConfigError(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldJiraPost := jiraPost
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	oldErrOut := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		jiraPost = oldJiraPost
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+		stderr = oldErrOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Fix login",
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) { return body, nil }
+
+	transitioned := false
+	jiraPost = func(url, user, token string, b []byte) ([]byte, error) {
+		transitioned = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error { return nil }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	// Invalid JSON config triggers config error warning
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{bad`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var outBuf bytes.Buffer
+	stdout = &outBuf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+
+	jiraNewCmd([]string{"PROJ-123"})
+
+	if transitioned {
+		t.Fatalf("expected no transition when config is invalid")
+	}
+	if !strings.Contains(errBuf.String(), "warning: config:") {
+		t.Fatalf("expected config warning on stderr, got %q", errBuf.String())
+	}
+	// Worktree still created
+	if !strings.Contains(outBuf.String(), repo+"-worktrees") {
+		t.Fatalf("expected worktree path, got %q", outBuf.String())
+	}
+}
+
+// --- jiraStatusSyncCmd tests ---
+
+func TestJiraStatusSyncNoPR(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "To Do"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
+		{ID: "1", Name: "Start", To: jiraStatus{Name: "In Progress"}},
+	}}
+	trBody, _ := json.Marshal(tr)
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		return issueBody, nil
+	}
+	transitioned := false
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) {
+		transitioned = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			// Simulate "no pull requests found"
+			return exec.Command("sh", "-c", "echo 'no pull requests found' >&2; exit 1")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix-bug\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd(nil)
+
+	if !transitioned {
+		t.Fatalf("expected transition to working")
+	}
+	if !strings.Contains(buf.String(), "PROJ-123 → In Progress") {
+		t.Fatalf("expected transition message, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncDraftPR(t *testing.T) {
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"OPEN","isDraft":true}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix-bug\n")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd(nil)
+
+	// Draft PR → do nothing
+	if buf.String() != "" {
+		t.Fatalf("expected no output for draft PR, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncOpenPR(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "In Progress"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
+		{ID: "2", Name: "Review", To: jiraStatus{Name: "In Review"}},
+	}}
+	trBody, _ := json.Marshal(tr)
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		return issueBody, nil
+	}
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) { return nil, nil }
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"OPEN","isDraft":false}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix-bug\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"review":"In Review"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd(nil)
+
+	if !strings.Contains(buf.String(), "PROJ-123 → In Review") {
+		t.Fatalf("expected transition to review, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncMergedPR(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "In Review"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
+		{ID: "3", Name: "Test", To: jiraStatus{Name: "In Testing"}},
+	}}
+	trBody, _ := json.Marshal(tr)
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		return issueBody, nil
+	}
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) { return nil, nil }
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"MERGED","isDraft":false}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix-bug\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"testing":"In Testing"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd(nil)
+
+	if !strings.Contains(buf.String(), "PROJ-123 → In Testing") {
+		t.Fatalf("expected transition to testing, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncClosedPR(t *testing.T) {
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"CLOSED","isDraft":false}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix-bug\n")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd(nil)
+
+	if buf.String() != "" {
+		t.Fatalf("expected no output for closed PR, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncExplicitKey(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-999", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "To Do"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
+		{ID: "1", Name: "Start", To: jiraStatus{Name: "In Progress"}},
+	}}
+	trBody, _ := json.Marshal(tr)
+
+	var fetchedKey string
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		if strings.Contains(url, "PROJ-999") {
+			fetchedKey = "PROJ-999"
+		}
+		return issueBody, nil
+	}
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) { return nil, nil }
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			// Simulate "no pull requests found" → working
+			return exec.Command("sh", "-c", "echo 'no pull requests found' >&2; exit 1")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-999-feature\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd([]string{"PROJ-999"})
+
+	if fetchedKey != "PROJ-999" {
+		t.Fatalf("expected PROJ-999, got %q", fetchedKey)
+	}
+	if !strings.Contains(buf.String(), "PROJ-999 → In Progress") {
+		t.Fatalf("expected transition message, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncNoConfig(t *testing.T) {
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "To Do"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+
+	jiraGet = func(url, user, token string) ([]byte, error) { return issueBody, nil }
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"OPEN","isDraft":false}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) { return nil, os.ErrNotExist }
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "no jira status mappings configured") {
+			t.Fatalf("expected config hint error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+func TestJiraStatusSyncGhNotInstalled(t *testing.T) {
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			// Return a command that won't be found
+			return exec.Command("__nonexistent_binary_for_test__")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "gh CLI is not installed") {
+			t.Fatalf("expected gh not installed error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+func TestJiraStatusSyncGhNotConfigured(t *testing.T) {
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return exec.Command("sh", "-c", "echo 'To get started with GitHub CLI, please run:  gh auth login' >&2; exit 1")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "gh CLI is not configured") {
+			t.Fatalf("expected gh not configured error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+func TestJiraStatusSyncAlreadyAtStatus(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "In Review"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+
+	jiraGet = func(url, user, token string) ([]byte, error) { return issueBody, nil }
+	transitioned := false
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) {
+		transitioned = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"OPEN","isDraft":false}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"review":"In Review"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd(nil)
+
+	if transitioned {
+		t.Fatalf("expected no transition when already at status")
+	}
+	if !strings.Contains(buf.String(), "PROJ-123: already In Review") {
+		t.Fatalf("expected already message, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncInferFail(t *testing.T) {
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("main\n")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "does not contain an issue key") {
+			t.Fatalf("expected branch error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+func TestJiraStatusSyncMissingEnv(t *testing.T) {
+	oldGetenv := osGetenv
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string { return "" }
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"OPEN","isDraft":false}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"review":"In Review"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "JIRA_URL") {
+			t.Fatalf("expected JIRA env var error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+// --- ghPRSymbolicStatus tests ---
+
+func TestGhPRSymbolicStatus(t *testing.T) {
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+
+	t.Run("open non-draft", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return cmdWithOutput(`{"state":"OPEN","isDraft":false}`)
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		status, err := ghPRSymbolicStatus()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if status != "review" {
+			t.Fatalf("expected review, got %q", status)
+		}
+	})
+
+	t.Run("draft", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return cmdWithOutput(`{"state":"OPEN","isDraft":true}`)
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		status, err := ghPRSymbolicStatus()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if status != "" {
+			t.Fatalf("expected empty for draft, got %q", status)
+		}
+	})
+
+	t.Run("merged", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return cmdWithOutput(`{"state":"MERGED","isDraft":false}`)
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		status, err := ghPRSymbolicStatus()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if status != "testing" {
+			t.Fatalf("expected testing, got %q", status)
+		}
+	})
+
+	t.Run("closed", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return cmdWithOutput(`{"state":"CLOSED","isDraft":false}`)
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		status, err := ghPRSymbolicStatus()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if status != "" {
+			t.Fatalf("expected empty for closed, got %q", status)
+		}
+	})
+
+	t.Run("no PR", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return exec.Command("sh", "-c", "echo 'no pull requests found' >&2; exit 1")
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		status, err := ghPRSymbolicStatus()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if status != "working" {
+			t.Fatalf("expected working, got %q", status)
+		}
+	})
+
+	t.Run("could not resolve", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return exec.Command("sh", "-c", "echo 'Could not resolve to a pull request' >&2; exit 1")
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		status, err := ghPRSymbolicStatus()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if status != "working" {
+			t.Fatalf("expected working, got %q", status)
+		}
+	})
+
+	t.Run("auth error", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return exec.Command("sh", "-c", "echo 'To get started with GitHub CLI, please run:  gh auth login' >&2; exit 1")
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		_, err := ghPRSymbolicStatus()
+		if err == nil || !strings.Contains(err.Error(), "gh CLI is not configured") {
+			t.Fatalf("expected gh not configured error, got %v", err)
+		}
+	})
+
+	t.Run("not installed", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return exec.Command("__nonexistent_binary_for_test__")
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		_, err := ghPRSymbolicStatus()
+		if err == nil || !strings.Contains(err.Error(), "gh CLI is not installed") {
+			t.Fatalf("expected gh not installed error, got %v", err)
+		}
+	})
+
+	t.Run("other error", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return exec.Command("sh", "-c", "echo 'something went wrong' >&2; exit 1")
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		_, err := ghPRSymbolicStatus()
+		if err == nil || !strings.Contains(err.Error(), "gh pr view") {
+			t.Fatalf("expected gh pr view error, got %v", err)
+		}
+	})
+
+	t.Run("invalid json", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "gh" {
+				return cmdWithOutput(`not json`)
+			}
+			if len(args) > 0 && args[0] == "-C" {
+				args = args[2:]
+			}
+			if len(args) >= 2 && args[0] == "rev-parse" {
+				return cmdWithOutput("feature-branch\n")
+			}
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		_, err := ghPRSymbolicStatus()
+		if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+			t.Fatalf("expected invalid JSON error, got %v", err)
+		}
+	})
+
+	t.Run("git error", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		_, err := ghPRSymbolicStatus()
+		if err == nil || !strings.Contains(err.Error(), "could not determine current branch") {
+			t.Fatalf("expected branch error, got %v", err)
+		}
+	})
+}
+
+// --- isExecNotFound tests ---
+
+func TestIsExecNotFound(t *testing.T) {
+	t.Run("true", func(t *testing.T) {
+		err := &exec.Error{Name: "gh", Err: exec.ErrNotFound}
+		if !isExecNotFound(err) {
+			t.Fatalf("expected true for exec.ErrNotFound")
+		}
+	})
+
+	t.Run("false - other error", func(t *testing.T) {
+		err := errors.New("something else")
+		if isExecNotFound(err) {
+			t.Fatalf("expected false for non-exec error")
+		}
+	})
+
+	t.Run("false - exec error not ErrNotFound", func(t *testing.T) {
+		err := &exec.Error{Name: "gh", Err: errors.New("other")}
+		if isExecNotFound(err) {
+			t.Fatalf("expected false for non-ErrNotFound exec error")
+		}
+	})
+}
+
+// --- jira status sync routing test ---
+
+func TestJiraStatusCmdRoutesToSync(t *testing.T) {
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("main\n")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		// The sync cmd was invoked (fails because main branch has no issue key)
+		if !strings.Contains(buf.String(), "does not contain an issue key") {
+			t.Fatalf("expected branch error from sync, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusCmd([]string{"sync"})
+}
+
+func TestJiraStatusSyncGitBranchError(t *testing.T) {
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "could not determine current branch") {
+			t.Fatalf("expected branch error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+func TestJiraStatusSyncConfigError(t *testing.T) {
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{bad`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "invalid config") {
+			t.Fatalf("expected config error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd([]string{"PROJ-123"})
+}
+
+func TestJiraStatusSyncFetchError(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return nil, errors.New("fetch fail")
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"OPEN","isDraft":false}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"review":"In Review"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "fetch fail") {
+			t.Fatalf("expected fetch error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+func TestJiraStatusSyncSetStatusError(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "To Do"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
+		{ID: "1", Name: "Start", To: jiraStatus{Name: "In Progress"}},
+	}}
+	trBody, _ := json.Marshal(tr)
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		return issueBody, nil
+	}
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) {
+		return nil, errors.New("post fail")
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return exec.Command("sh", "-c", "echo 'no pull requests found' >&2; exit 1")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "post fail") {
+			t.Fatalf("expected post fail error, got %q", buf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+func TestReverseSymbolic(t *testing.T) {
+	t.Run("type override match", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"working": "In Progress"},
+			Types: map[string]map[string]string{
+				"story": {"working": "In Development"},
+			},
+		}}}
+		got := reverseSymbolic(cfg, "Story", "In Development")
+		if got != "working" {
+			t.Fatalf("expected working, got %q", got)
+		}
+	})
+
+	t.Run("default match", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"review": "In Review"},
+		}}}
+		got := reverseSymbolic(cfg, "Story", "In Review")
+		if got != "review" {
+			t.Fatalf("expected review, got %q", got)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"working": "In Progress"},
+		}}}
+		got := reverseSymbolic(cfg, "Story", "Unknown Status")
+		if got != "" {
+			t.Fatalf("expected empty, got %q", got)
+		}
+	})
+
+	t.Run("case insensitive", func(t *testing.T) {
+		cfg := wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+			Default: map[string]string{"working": "in progress"},
+		}}}
+		got := reverseSymbolic(cfg, "Story", "In Progress")
+		if got != "working" {
+			t.Fatalf("expected working, got %q", got)
+		}
+	})
+
+	t.Run("empty config", func(t *testing.T) {
+		cfg := wtConfig{}
+		got := reverseSymbolic(cfg, "Story", "In Progress")
+		if got != "" {
+			t.Fatalf("expected empty, got %q", got)
+		}
+	})
+}
+
+func TestJiraConfigCmd(t *testing.T) {
+	t.Run("defaults and types", func(t *testing.T) {
+		oldOut := stdout
+		oldReadFile := osReadFile
+		oldHomeDir := osUserHomeDir
+		oldExec := execCommand
+		defer func() {
+			stdout = oldOut
+			osReadFile = oldReadFile
+			osUserHomeDir = oldHomeDir
+			execCommand = oldExec
+		}()
+
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == "/home/test/.config/wt/config.json" {
+				return []byte(`{"jira":{"status":{"default":{"review":"In Review","working":"In Progress"},"types":{"story":{"working":"In Development"}}}}}`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+
+		var buf bytes.Buffer
+		stdout = &buf
+
+		jiraConfigCmd(nil)
+
+		out := buf.String()
+		if !strings.Contains(out, "default:") {
+			t.Fatalf("expected default section, got %q", out)
+		}
+		if !strings.Contains(out, "review → In Review") {
+			t.Fatalf("expected review mapping, got %q", out)
+		}
+		if !strings.Contains(out, "working → In Progress") {
+			t.Fatalf("expected working mapping, got %q", out)
+		}
+		if !strings.Contains(out, "story:") {
+			t.Fatalf("expected story section, got %q", out)
+		}
+		if !strings.Contains(out, "working → In Development") {
+			t.Fatalf("expected story override, got %q", out)
+		}
+	})
+
+	t.Run("no config", func(t *testing.T) {
+		oldOut := stdout
+		oldReadFile := osReadFile
+		oldHomeDir := osUserHomeDir
+		oldExec := execCommand
+		defer func() {
+			stdout = oldOut
+			osReadFile = oldReadFile
+			osUserHomeDir = oldHomeDir
+			execCommand = oldExec
+		}()
+
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) { return nil, os.ErrNotExist }
+
+		var buf bytes.Buffer
+		stdout = &buf
+
+		jiraConfigCmd(nil)
+
+		if !strings.Contains(buf.String(), "no config found") {
+			t.Fatalf("expected no config found, got %q", buf.String())
+		}
+	})
+
+	t.Run("config error", func(t *testing.T) {
+		oldExit := exitFunc
+		oldErr := stderr
+		oldReadFile := osReadFile
+		oldHomeDir := osUserHomeDir
+		oldExec := execCommand
+		defer func() {
+			exitFunc = oldExit
+			stderr = oldErr
+			osReadFile = oldReadFile
+			osUserHomeDir = oldHomeDir
+			execCommand = oldExec
+		}()
+
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == "/home/test/.config/wt/config.json" {
+				return []byte(`{bad`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+
+		var buf bytes.Buffer
+		stderr = &buf
+		exitFunc = func(code int) { panic(code) }
+
+		defer func() {
+			if r := recover(); r != 1 {
+				t.Fatalf("expected exit 1, got %v", r)
+			}
+			if !strings.Contains(buf.String(), "invalid config") {
+				t.Fatalf("expected invalid config error, got %q", buf.String())
+			}
+		}()
+
+		jiraConfigCmd(nil)
+	})
+
+	t.Run("with issue key", func(t *testing.T) {
+		oldOut := stdout
+		oldReadFile := osReadFile
+		oldHomeDir := osUserHomeDir
+		oldExec := execCommand
+		oldGetenv := osGetenv
+		oldGet := jiraGet
+		defer func() {
+			stdout = oldOut
+			osReadFile = oldReadFile
+			osUserHomeDir = oldHomeDir
+			execCommand = oldExec
+			osGetenv = oldGetenv
+			jiraGet = oldGet
+		}()
+
+		osUserHomeDir = func() (string, error) { return "/home/test", nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		osReadFile = func(name string) ([]byte, error) {
+			if name == "/home/test/.config/wt/config.json" {
+				return []byte(`{"jira":{"status":{"default":{"working":"In Progress","review":"In Review"},"types":{"story":{"working":"In Development"}}}}}`), nil
+			}
+			return nil, os.ErrNotExist
+		}
+		osGetenv = func(key string) string {
+			switch key {
+			case "JIRA_URL":
+				return "https://jira.example.com"
+			case "JIRA_USER":
+				return "user"
+			case "JIRA_TOKEN":
+				return "token"
+			}
+			return ""
+		}
+		issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+			Summary:   "Test",
+			Status:    jiraStatus{Name: "To Do"},
+			IssueType: jiraIssueType{Name: "Story"},
+		}}
+		issueBody, _ := json.Marshal(issue)
+		jiraGet = func(url, user, token string) ([]byte, error) { return issueBody, nil }
+
+		var buf bytes.Buffer
+		stdout = &buf
+
+		jiraConfigCmd([]string{"PROJ-123"})
+
+		out := buf.String()
+		if !strings.Contains(out, "resolved (story):") {
+			t.Fatalf("expected resolved section, got %q", out)
+		}
+		if !strings.Contains(out, "working → In Development") {
+			t.Fatalf("expected resolved working override, got %q", out)
+		}
+		if !strings.Contains(out, "review → In Review") {
+			t.Fatalf("expected resolved review fallthrough, got %q", out)
+		}
+	})
+}
+
+func TestJiraConfigCmdMissingEnv(t *testing.T) {
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	oldExec := execCommand
+	oldGetenv := osGetenv
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+		execCommand = oldExec
+		osGetenv = oldGetenv
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	osGetenv = func(key string) string { return "" }
+
+	var outBuf bytes.Buffer
+	stdout = &outBuf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "JIRA_URL") {
+			t.Fatalf("expected env var error, got %q", errBuf.String())
+		}
+	}()
+
+	jiraConfigCmd([]string{"PROJ-123"})
+}
+
+func TestJiraConfigCmdFetchError(t *testing.T) {
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	oldExec := execCommand
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+		execCommand = oldExec
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return nil, errors.New("fetch fail")
+	}
+
+	var outBuf bytes.Buffer
+	stdout = &outBuf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "fetch fail") {
+			t.Fatalf("expected fetch error, got %q", errBuf.String())
+		}
+	}()
+
+	jiraConfigCmd([]string{"PROJ-123"})
+}
+
+func TestJiraConfigCmdEmptyTypeMap(t *testing.T) {
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	oldExec := execCommand
+	defer func() {
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+		execCommand = oldExec
+	}()
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"},"types":{"story":{}}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraConfigCmd(nil)
+
+	out := buf.String()
+	if !strings.Contains(out, "default:") {
+		t.Fatalf("expected default section, got %q", out)
+	}
+	// Empty type map should be skipped
+	if strings.Contains(out, "story:") {
+		t.Fatalf("expected empty story type to be skipped, got %q", out)
+	}
+}
+
+func TestJiraStatusCmdShowNoConfig(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldOut := stdout
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	oldExec := execCommand
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		stdout = oldOut
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+		execCommand = oldExec
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Test", Status: jiraStatus{Name: "Open"}, IssueType: jiraIssueType{Name: "Story"}}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{
+		{ID: "1", Name: "Start", To: jiraStatus{Name: "In Progress"}},
+	}}
+	trBody, _ := json.Marshal(tr)
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		return issueBody, nil
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) { return nil, os.ErrNotExist }
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+
+	jiraStatusCmd([]string{"PROJ-123"})
+
+	out := buf.String()
+	if !strings.Contains(out, "PROJ-123: Open") {
+		t.Fatalf("expected status line, got %q", out)
+	}
+	// Without config, transitions should show without annotation
+	if strings.Contains(out, "(working)") {
+		t.Fatalf("expected no annotation without config, got %q", out)
+	}
+	if !strings.Contains(out, "  In Progress\n") {
+		t.Fatalf("expected plain In Progress transition, got %q", out)
+	}
+	if !strings.Contains(errBuf.String(), "hint: run 'wt jira config --init'") {
+		t.Fatalf("expected hint on stderr, got %q", errBuf.String())
+	}
+}
+
+func TestJiraStatusSyncDryRunNoPR(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "To Do"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+
+	jiraGet = func(url, user, token string) ([]byte, error) { return issueBody, nil }
+	posted := false
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) {
+		posted = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return exec.Command("sh", "-c", "echo 'no pull requests found' >&2; exit 1")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix-bug\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd([]string{"--dry-run"})
+
+	if posted {
+		t.Fatalf("expected no jiraPost call with dry run")
+	}
+	if !strings.Contains(buf.String(), "To Do → In Progress (dry run)") {
+		t.Fatalf("expected dry run message, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncDryRunAlready(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "In Progress"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+
+	jiraGet = func(url, user, token string) ([]byte, error) { return issueBody, nil }
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return exec.Command("sh", "-c", "echo 'no pull requests found' >&2; exit 1")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd([]string{"-n"})
+
+	if !strings.Contains(buf.String(), "already In Progress") {
+		t.Fatalf("expected already message, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncDryRunOpenPR(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "In Progress"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+
+	jiraGet = func(url, user, token string) ([]byte, error) { return issueBody, nil }
+	posted := false
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) {
+		posted = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return cmdWithOutput(`{"state":"OPEN","isDraft":false}`)
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-123-fix\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"review":"In Review"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd([]string{"--dry-run"})
+
+	if posted {
+		t.Fatalf("expected no jiraPost call with dry run")
+	}
+	if !strings.Contains(buf.String(), "In Progress → In Review (dry run)") {
+		t.Fatalf("expected dry run message, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusSyncDryRunExplicitKey(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldPost := jiraPost
+	oldExec := execCommand
+	oldOut := stdout
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		jiraPost = oldPost
+		execCommand = oldExec
+		stdout = oldOut
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-999", Fields: jiraFields{
+		Summary:   "Test",
+		Status:    jiraStatus{Name: "To Do"},
+		IssueType: jiraIssueType{Name: "Story"},
+	}}
+	issueBody, _ := json.Marshal(issue)
+
+	jiraGet = func(url, user, token string) ([]byte, error) { return issueBody, nil }
+	posted := false
+	jiraPost = func(url, user, token string, body []byte) ([]byte, error) {
+		posted = true
+		return nil, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "gh" {
+			return exec.Command("sh", "-c", "echo 'no pull requests found' >&2; exit 1")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-999-feature\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) {
+		if name == "/home/test/.config/wt/config.json" {
+			return []byte(`{"jira":{"status":{"default":{"working":"In Progress"}}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraStatusSyncCmd([]string{"-n", "PROJ-999"})
+
+	if posted {
+		t.Fatalf("expected no jiraPost call with dry run")
+	}
+	if !strings.Contains(buf.String(), "PROJ-999: To Do → In Progress (dry run)") {
+		t.Fatalf("expected dry run message, got %q", buf.String())
+	}
+}
+
+func TestMainHelpIncludesConfig(t *testing.T) {
+	oldErr := stderr
+	defer func() { stderr = oldErr }()
+
+	var buf bytes.Buffer
+	stderr = &buf
+	printUsage()
+
+	if !strings.Contains(buf.String(), "jira config") {
+		t.Fatalf("expected jira config in usage output, got %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "--dry-run") {
+		t.Fatalf("expected --dry-run in usage output, got %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "--init") {
+		t.Fatalf("expected --init in usage output, got %q", buf.String())
+	}
+}
+
+func TestHasStatusConfig(t *testing.T) {
+	if hasStatusConfig(wtConfig{}) {
+		t.Fatal("expected false for empty config")
+	}
+	if !hasStatusConfig(wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+		Default: map[string]string{"working": "In Progress"},
+	}}}) {
+		t.Fatal("expected true for defaults-only config")
+	}
+	if !hasStatusConfig(wtConfig{Jira: jiraConfigBlock{Status: jiraStatusConfig{
+		Types: map[string]map[string]string{"bug": {"working": "In Progress"}},
+	}}}) {
+		t.Fatal("expected true for types-only config")
+	}
+}
+
+func TestTemplateConfig(t *testing.T) {
+	cfg := templateConfig()
+	if len(cfg.Jira.Status.Default) == 0 {
+		t.Fatal("expected non-empty defaults")
+	}
+	for _, key := range []string{"working", "review", "testing", "done"} {
+		if _, ok := cfg.Jira.Status.Default[key]; !ok {
+			t.Fatalf("expected key %q in defaults", key)
+		}
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundTrip wtConfig
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(roundTrip.Jira.Status.Default) != len(cfg.Jira.Status.Default) {
+		t.Fatal("round-trip mismatch")
+	}
+}
+
+func TestJiraConfigCmdInitGlobal(t *testing.T) {
+	oldOut := stdout
+	oldIn := stdin
+	oldExit := exitFunc
+	oldErr := stderr
+	oldHomeDir := osUserHomeDir
+	oldMkdir := osMkdirAll
+	oldWriteFile := osWriteFile
+	defer func() {
+		stdout = oldOut
+		stdin = oldIn
+		exitFunc = oldExit
+		stderr = oldErr
+		osUserHomeDir = oldHomeDir
+		osMkdirAll = oldMkdir
+		osWriteFile = oldWriteFile
+	}()
+
+	var buf bytes.Buffer
+	stdout = &buf
+	stdin = strings.NewReader("g\n")
+	exitFunc = func(code int) { panic(code) }
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+
+	var mkdirPath string
+	osMkdirAll = func(path string, perm fs.FileMode) error {
+		mkdirPath = path
+		return nil
+	}
+
+	var writePath string
+	var writeData []byte
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		writePath = name
+		writeData = data
+		return nil
+	}
+
+	jiraConfigCmd([]string{"--init"})
+
+	if mkdirPath != "/home/test/.config/wt" {
+		t.Fatalf("expected mkdir /home/test/.config/wt, got %q", mkdirPath)
+	}
+	if writePath != "/home/test/.config/wt/config.json" {
+		t.Fatalf("expected write to /home/test/.config/wt/config.json, got %q", writePath)
+	}
+	var cfg wtConfig
+	if err := json.Unmarshal(writeData, &cfg); err != nil {
+		t.Fatalf("invalid JSON written: %v", err)
+	}
+	if !hasStatusConfig(cfg) {
+		t.Fatal("expected valid status config in written data")
+	}
+	if !strings.Contains(buf.String(), "wrote /home/test/.config/wt/config.json") {
+		t.Fatalf("expected wrote message, got %q", buf.String())
+	}
+}
+
+func TestJiraConfigCmdInitRepo(t *testing.T) {
+	oldOut := stdout
+	oldIn := stdin
+	oldExit := exitFunc
+	oldErr := stderr
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	defer func() {
+		stdout = oldOut
+		stdin = oldIn
+		exitFunc = oldExit
+		stderr = oldErr
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+	}()
+
+	var buf bytes.Buffer
+	stdout = &buf
+	stdin = strings.NewReader("r\n")
+	exitFunc = func(code int) { panic(code) }
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/my/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	var writePath string
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		writePath = name
+		return nil
+	}
+
+	jiraConfigCmd([]string{"--init"})
+
+	if writePath != "/my/repo/.wt.json" {
+		t.Fatalf("expected write to /my/repo/.wt.json, got %q", writePath)
+	}
+	if !strings.Contains(buf.String(), "wrote /my/repo/.wt.json") {
+		t.Fatalf("expected wrote message, got %q", buf.String())
+	}
+}
+
+func TestJiraConfigCmdInitInvalidChoice(t *testing.T) {
+	oldOut := stdout
+	oldIn := stdin
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		stdout = oldOut
+		stdin = oldIn
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	stdin = strings.NewReader("x\n")
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "invalid choice") {
+			t.Fatalf("expected invalid choice error, got %q", errBuf.String())
+		}
+	}()
+
+	jiraConfigCmd([]string{"--init"})
+}
+
+func TestJiraConfigCmdInitNoInput(t *testing.T) {
+	oldOut := stdout
+	oldIn := stdin
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		stdout = oldOut
+		stdin = oldIn
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	stdin = strings.NewReader("")
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "no input") {
+			t.Fatalf("expected no input error, got %q", errBuf.String())
+		}
+	}()
+
+	jiraConfigCmd([]string{"--init"})
+}
+
+func TestJiraConfigCmdInitWriteError(t *testing.T) {
+	oldOut := stdout
+	oldIn := stdin
+	oldExit := exitFunc
+	oldErr := stderr
+	oldHomeDir := osUserHomeDir
+	oldMkdir := osMkdirAll
+	oldWriteFile := osWriteFile
+	defer func() {
+		stdout = oldOut
+		stdin = oldIn
+		exitFunc = oldExit
+		stderr = oldErr
+		osUserHomeDir = oldHomeDir
+		osMkdirAll = oldMkdir
+		osWriteFile = oldWriteFile
+	}()
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	stdin = strings.NewReader("g\n")
+	exitFunc = func(code int) { panic(code) }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osMkdirAll = func(path string, perm fs.FileMode) error { return nil }
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		return errors.New("disk full")
+	}
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "disk full") {
+			t.Fatalf("expected disk full error, got %q", errBuf.String())
+		}
+	}()
+
+	jiraConfigCmd([]string{"--init"})
+}
+
+func TestJiraConfigCmdInitMkdirError(t *testing.T) {
+	oldOut := stdout
+	oldIn := stdin
+	oldExit := exitFunc
+	oldErr := stderr
+	oldHomeDir := osUserHomeDir
+	oldMkdir := osMkdirAll
+	defer func() {
+		stdout = oldOut
+		stdin = oldIn
+		exitFunc = oldExit
+		stderr = oldErr
+		osUserHomeDir = oldHomeDir
+		osMkdirAll = oldMkdir
+	}()
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	stdin = strings.NewReader("g\n")
+	exitFunc = func(code int) { panic(code) }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osMkdirAll = func(path string, perm fs.FileMode) error {
+		return errors.New("permission denied")
+	}
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "permission denied") {
+			t.Fatalf("expected permission denied error, got %q", errBuf.String())
+		}
+	}()
+
+	jiraConfigCmd([]string{"--init"})
+}
+
+func TestJiraConfigCmdInitHomeDirError(t *testing.T) {
+	oldOut := stdout
+	oldIn := stdin
+	oldExit := exitFunc
+	oldErr := stderr
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		stdout = oldOut
+		stdin = oldIn
+		exitFunc = oldExit
+		stderr = oldErr
+		osUserHomeDir = oldHomeDir
+	}()
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	stdin = strings.NewReader("g\n")
+	exitFunc = func(code int) { panic(code) }
+	osUserHomeDir = func() (string, error) { return "", errors.New("no home") }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "no home") {
+			t.Fatalf("expected no home error, got %q", errBuf.String())
+		}
+	}()
+
+	jiraConfigCmd([]string{"--init"})
+}
+
+func TestJiraConfigCmdInitRepoRootError(t *testing.T) {
+	oldOut := stdout
+	oldIn := stdin
+	oldExit := exitFunc
+	oldErr := stderr
+	oldExec := execCommand
+	defer func() {
+		stdout = oldOut
+		stdin = oldIn
+		exitFunc = oldExit
+		stderr = oldErr
+		execCommand = oldExec
+	}()
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	stdin = strings.NewReader("r\n")
+	exitFunc = func(code int) { panic(code) }
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "echo 'not a repo' >&2; exit 128")
+	}
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+	}()
+
+	jiraConfigCmd([]string{"--init"})
+}
+
+func TestJiraNewCmdNoConfigDies(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	oldErr := stderr
+	oldExit := exitFunc
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+		stderr = oldErr
+		exitFunc = oldExit
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) { return body, nil }
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error { return nil }
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) { return nil, os.ErrNotExist }
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "no jira status mappings configured") {
+			t.Fatalf("expected config hint, got %q", errBuf.String())
+		}
+		if !strings.Contains(errBuf.String(), "wt jira config --init") {
+			t.Fatalf("expected --init hint, got %q", errBuf.String())
+		}
+	}()
+
+	jiraNewCmd([]string{"PROJ-123"})
+}
+
+func TestJiraStatusSyncNoConfigDies(t *testing.T) {
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	defer func() {
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return cmdWithOutput("PROJ-456-fix\n")
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) { return nil, os.ErrNotExist }
+
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(errBuf.String(), "no jira status mappings configured") {
+			t.Fatalf("expected config hint, got %q", errBuf.String())
+		}
+		if !strings.Contains(errBuf.String(), "wt jira config --init") {
+			t.Fatalf("expected --init hint, got %q", errBuf.String())
+		}
+	}()
+
+	jiraStatusSyncCmd(nil)
+}
+
+func TestJiraStatusCmdShowHint(t *testing.T) {
+	oldGetenv := osGetenv
+	oldGet := jiraGet
+	oldOut := stdout
+	oldErr := stderr
+	oldReadFile := osReadFile
+	oldHomeDir := osUserHomeDir
+	oldExec := execCommand
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldGet
+		stdout = oldOut
+		stderr = oldErr
+		osReadFile = oldReadFile
+		osUserHomeDir = oldHomeDir
+		execCommand = oldExec
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Test", Status: jiraStatus{Name: "Open"}, IssueType: jiraIssueType{Name: "Story"}}}
+	issueBody, _ := json.Marshal(issue)
+	tr := jiraTransitionsResponse{Transitions: []jiraTransition{}}
+	trBody, _ := json.Marshal(tr)
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		if strings.Contains(url, "/transitions") {
+			return trBody, nil
+		}
+		return issueBody, nil
+	}
+
+	osUserHomeDir = func() (string, error) { return "/home/test", nil }
+	osReadFile = func(name string) ([]byte, error) { return nil, os.ErrNotExist }
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+	var errBuf bytes.Buffer
+	stderr = &errBuf
+
+	jiraStatusCmd([]string{"PROJ-123"})
+
+	if !strings.Contains(errBuf.String(), "hint: run 'wt jira config --init'") {
+		t.Fatalf("expected hint on stderr, got %q", errBuf.String())
+	}
 }

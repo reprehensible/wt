@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -26,11 +29,16 @@ type jiraIssue struct {
 	Fields jiraFields `json:"fields"`
 }
 
+type jiraIssueType struct {
+	Name string `json:"name"`
+}
+
 type jiraFields struct {
-	Summary     string       `json:"summary"`
-	Description string       `json:"description"`
-	Comment     jiraComments `json:"comment"`
-	Status      jiraStatus   `json:"status"`
+	Summary     string         `json:"summary"`
+	Description string         `json:"description"`
+	Comment     jiraComments   `json:"comment"`
+	Status      jiraStatus     `json:"status"`
+	IssueType   jiraIssueType  `json:"issuetype"`
 }
 
 type jiraComments struct {
@@ -184,7 +192,7 @@ func jiraEnv() (string, string, string, error) {
 }
 
 func jiraFetchIssue(baseURL, issueKey, user, token string) (jiraIssue, error) {
-	apiURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,comment,status", baseURL, issueKey)
+	apiURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,comment,status,issuetype", baseURL, issueKey)
 	body, err := jiraGet(apiURL, user, token)
 	if err != nil {
 		return jiraIssue{}, err
@@ -220,13 +228,15 @@ func jiraSetStatus(baseURL, issueKey, statusName, user, token string) error {
 
 func jiraCmd(args []string) {
 	if len(args) == 0 {
-		die(errors.New("usage: wt jira <new|status> ..."))
+		die(errors.New("usage: wt jira <new|status|config> ..."))
 	}
 	switch args[0] {
 	case "new":
 		jiraNewCmd(args[1:])
 	case "status":
 		jiraStatusCmd(args[1:])
+	case "config":
+		jiraConfigCmd(args[1:])
 	default:
 		die(fmt.Errorf("unknown jira command: %s", args[0]))
 	}
@@ -247,6 +257,8 @@ func jiraNewCmd(args []string) {
 	fs.BoolVar(noCopyLibs, "L", false, "skip copying libraries")
 	fromBranch := fs.String("from", "", "base branch to create from")
 	fs.StringVar(fromBranch, "f", "", "base branch to create from")
+	noStatusUpdate := fs.Bool("no-status-update", false, "skip auto-transition")
+	fs.BoolVar(noStatusUpdate, "S", false, "skip auto-transition")
 	_ = fs.Parse(args)
 
 	issueKey := ""
@@ -292,6 +304,24 @@ func jiraNewCmd(args []string) {
 
 	fmt.Fprintln(stdout, wtPath)
 
+	if !*noStatusUpdate {
+		cfg, err := loadConfig()
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: config: %v\n", err)
+		} else if !hasStatusConfig(cfg) {
+			die(errors.New("no jira status mappings configured; run 'wt jira config --init'"))
+		} else {
+			target, err := resolveStatus(cfg, issue.Fields.IssueType.Name, "working")
+			if err == nil {
+				if err := jiraSetStatus(baseURL, issueKey, target, user, token); err != nil {
+					fmt.Fprintf(stderr, "warning: %v\n", err)
+				} else {
+					fmt.Fprintf(stdout, "%s → %s\n", issueKey, target)
+				}
+			}
+		}
+	}
+
 	if *tmux {
 		if err := openTmux(wtPath); err != nil {
 			die(err)
@@ -300,6 +330,11 @@ func jiraNewCmd(args []string) {
 }
 
 func jiraStatusCmd(args []string) {
+	if len(args) > 0 && args[0] == "sync" {
+		jiraStatusSyncCmd(args[1:])
+		return
+	}
+
 	issueKey := ""
 	statusName := ""
 
@@ -351,10 +386,264 @@ func jiraStatusCmd(args []string) {
 	if err := json.Unmarshal(body, &tr); err != nil {
 		die(fmt.Errorf("jira: invalid transitions response: %w", err))
 	}
+
+	cfg, cfgErr := loadConfig()
+
 	if len(tr.Transitions) > 0 {
 		fmt.Fprintln(stdout, "\nAvailable transitions:")
 		for _, t := range tr.Transitions {
-			fmt.Fprintf(stdout, "  %s\n", t.To.Name)
+			sym := ""
+			if cfgErr == nil && hasStatusConfig(cfg) {
+				sym = reverseSymbolic(cfg, issue.Fields.IssueType.Name, t.To.Name)
+			}
+			if sym != "" {
+				fmt.Fprintf(stdout, "  %s (%s)\n", t.To.Name, sym)
+			} else {
+				fmt.Fprintf(stdout, "  %s\n", t.To.Name)
+			}
 		}
 	}
+
+	if cfgErr == nil && !hasStatusConfig(cfg) {
+		fmt.Fprintln(stderr, "hint: run 'wt jira config --init' to enable symbolic annotations")
+	}
+}
+
+func jiraStatusSyncCmd(args []string) {
+	fs := flag.NewFlagSet("jira status sync", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "show what would happen without making changes")
+	fs.BoolVar(dryRun, "n", false, "dry run")
+	_ = fs.Parse(args)
+
+	issueKey := ""
+	if fs.NArg() > 0 {
+		issueKey = fs.Arg(0)
+	}
+
+	if issueKey == "" {
+		branch, err := runGitOutput("", "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			die(fmt.Errorf("jira: could not determine current branch: %w", err))
+		}
+		issueKey = jiraIssueKeyFromBranch(strings.TrimSpace(branch))
+		if issueKey == "" {
+			die(errors.New("jira: current branch does not contain an issue key"))
+		}
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		die(err)
+	}
+	if !hasStatusConfig(cfg) {
+		die(errors.New("no jira status mappings configured; run 'wt jira config --init'"))
+	}
+
+	symbolic, err := ghPRSymbolicStatus()
+	if err != nil {
+		die(err)
+	}
+	if symbolic == "" {
+		return
+	}
+
+	baseURL, user, token, err := jiraEnv()
+	if err != nil {
+		die(err)
+	}
+
+	issue, err := jiraFetchIssue(baseURL, issueKey, user, token)
+	if err != nil {
+		die(err)
+	}
+
+	target, err := resolveStatus(cfg, issue.Fields.IssueType.Name, symbolic)
+	if err != nil {
+		die(err)
+	}
+
+	if strings.EqualFold(issue.Fields.Status.Name, target) {
+		fmt.Fprintf(stdout, "%s: already %s\n", issueKey, target)
+		return
+	}
+
+	if *dryRun {
+		fmt.Fprintf(stdout, "%s: %s → %s (dry run)\n", issueKey, issue.Fields.Status.Name, target)
+		return
+	}
+
+	if err := jiraSetStatus(baseURL, issueKey, target, user, token); err != nil {
+		die(err)
+	}
+	fmt.Fprintf(stdout, "%s → %s\n", issueKey, target)
+}
+
+func jiraConfigCmd(args []string) {
+	fs := flag.NewFlagSet("jira config", flag.ExitOnError)
+	initFlag := fs.Bool("init", false, "bootstrap a template config")
+	_ = fs.Parse(args)
+
+	if *initFlag {
+		jiraConfigInit()
+		return
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		die(err)
+	}
+	if len(cfg.Jira.Status.Default) == 0 && len(cfg.Jira.Status.Types) == 0 {
+		fmt.Fprintln(stdout, "no config found")
+		return
+	}
+
+	if len(cfg.Jira.Status.Default) > 0 {
+		fmt.Fprintln(stdout, "default:")
+		keys := make([]string, 0, len(cfg.Jira.Status.Default))
+		for k := range cfg.Jira.Status.Default {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(stdout, "  %s → %s\n", k, cfg.Jira.Status.Default[k])
+		}
+	}
+
+	typeNames := make([]string, 0, len(cfg.Jira.Status.Types))
+	for tn := range cfg.Jira.Status.Types {
+		typeNames = append(typeNames, tn)
+	}
+	sort.Strings(typeNames)
+	for _, tn := range typeNames {
+		m := cfg.Jira.Status.Types[tn]
+		if len(m) == 0 {
+			continue
+		}
+		fmt.Fprintf(stdout, "\n%s:\n", tn)
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(stdout, "  %s → %s\n", k, m[k])
+		}
+	}
+
+	if fs.NArg() > 0 {
+		issueKey := fs.Arg(0)
+		baseURL, user, token, err := jiraEnv()
+		if err != nil {
+			die(err)
+		}
+		issue, err := jiraFetchIssue(baseURL, issueKey, user, token)
+		if err != nil {
+			die(err)
+		}
+		issueType := issue.Fields.IssueType.Name
+
+		symbolics := []string{"working", "review", "testing", "done"}
+		fmt.Fprintf(stdout, "\nresolved (%s):\n", strings.ToLower(issueType))
+		for _, sym := range symbolics {
+			target, err := resolveStatus(cfg, issueType, sym)
+			if err == nil {
+				fmt.Fprintf(stdout, "  %s → %s\n", sym, target)
+			}
+		}
+	}
+}
+
+func jiraConfigInit() {
+	fmt.Fprintln(stdout, "Where should the config be written?")
+	fmt.Fprintln(stdout, "  [g] global  (~/.config/wt/config.json)")
+	fmt.Fprintln(stdout, "  [r] repo    (.wt.json)")
+	fmt.Fprintf(stdout, "choice [g/r]: ")
+
+	scanner := bufio.NewScanner(stdin)
+	if !scanner.Scan() {
+		die(errors.New("no input"))
+	}
+	choice := strings.TrimSpace(scanner.Text())
+
+	cfg := templateConfig()
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	data = append(data, '\n')
+
+	var path string
+	switch choice {
+	case "g":
+		home, err := osUserHomeDir()
+		if err != nil {
+			die(err)
+		}
+		dir := filepath.Join(home, ".config", "wt")
+		if err := osMkdirAll(dir, 0o755); err != nil {
+			die(err)
+		}
+		path = filepath.Join(dir, "config.json")
+	case "r":
+		root, err := gitRepoRoot()
+		if err != nil {
+			die(err)
+		}
+		path = filepath.Join(root, ".wt.json")
+	default:
+		die(fmt.Errorf("invalid choice: %q", choice))
+	}
+
+	if err := osWriteFile(path, data, 0o644); err != nil {
+		die(err)
+	}
+	fmt.Fprintf(stdout, "wrote %s\n", path)
+}
+
+func ghPRSymbolicStatus() (string, error) {
+	branch, err := runGitOutput("", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("could not determine current branch: %w", err)
+	}
+	branch = strings.TrimSpace(branch)
+
+	cmd := execCommand("gh", "pr", "view", branch, "--json", "state,isDraft")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if isExecNotFound(err) {
+			return "", errors.New("gh CLI is not installed")
+		}
+		outStr := string(out)
+		if strings.Contains(outStr, "auth login") || strings.Contains(outStr, "not logged") {
+			return "", errors.New("gh CLI is not configured (run gh auth login)")
+		}
+		if strings.Contains(outStr, "no pull requests found") || strings.Contains(outStr, "Could not resolve") {
+			return "working", nil
+		}
+		return "", fmt.Errorf("gh pr view: %w\n%s", err, strings.TrimSpace(outStr))
+	}
+
+	var pr struct {
+		State   string `json:"state"`
+		IsDraft bool   `json:"isDraft"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil {
+		return "", fmt.Errorf("gh: invalid JSON: %w", err)
+	}
+
+	switch {
+	case pr.State == "MERGED":
+		return "testing", nil
+	case pr.State == "CLOSED":
+		return "", nil
+	case pr.IsDraft:
+		return "", nil
+	default:
+		return "review", nil
+	}
+}
+
+func isExecNotFound(err error) bool {
+	var execErr *exec.Error
+	if errors.As(err, &execErr) {
+		return errors.Is(execErr.Err, exec.ErrNotFound)
+	}
+	return false
 }
