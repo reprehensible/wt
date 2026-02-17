@@ -17,6 +17,7 @@ func printUsage() {
 	fmt.Fprintln(stderr, "  list            list worktrees")
 	fmt.Fprintln(stderr, "  go [name]        enter a worktree shell")
 	fmt.Fprintln(stderr, "  t [name]         open worktree in tmux session")
+	fmt.Fprintln(stderr, "  jira [key]       create worktree from Jira issue")
 	fmt.Fprintln(stderr, "")
 	fmt.Fprintln(stderr, "new options:")
 	fmt.Fprintln(stderr, "  -c, --copy-config     copy config files (default)")
@@ -24,6 +25,70 @@ func printUsage() {
 	fmt.Fprintln(stderr, "  -l, --copy-libs       copy libraries (default: off)")
 	fmt.Fprintln(stderr, "  -L, --no-copy-libs    skip copying libraries")
 	fmt.Fprintln(stderr, "  -f, --from            base branch to create from")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "jira options:")
+	fmt.Fprintln(stderr, "  -t                    open worktree in tmux after creation")
+	fmt.Fprintln(stderr, "  -b, --branch          override auto-generated branch name")
+	fmt.Fprintln(stderr, "  -c, --copy-config     copy config files (default)")
+	fmt.Fprintln(stderr, "  -C, --no-copy-config  skip copying config files")
+	fmt.Fprintln(stderr, "  -l, --copy-libs       copy libraries (default: off)")
+	fmt.Fprintln(stderr, "  -L, --no-copy-libs    skip copying libraries")
+	fmt.Fprintln(stderr, "  -f, --from            base branch to create from")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "jira env vars: JIRA_URL, JIRA_USER, JIRA_TOKEN")
+}
+
+func addWorktree(branch, fromBranch string, copyConfig, copyLibs bool) (string, error) {
+	repoRoot, err := gitRepoRoot()
+	if err != nil {
+		return "", err
+	}
+
+	mainWT, err := gitMainWorktree(repoRoot)
+	if err != nil {
+		return "", err
+	}
+
+	wtPath := worktreePath(mainWT, branch)
+	if err := osMkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		return "", err
+	}
+
+	if fromBranch != "" {
+		if err := runGit(repoRoot, "worktree", "add", "-b", branch, wtPath, fromBranch); err != nil {
+			return "", err
+		}
+	} else {
+		exists, err := gitBranchExists(repoRoot, branch)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			if err := runGit(repoRoot, "worktree", "add", wtPath, branch); err != nil {
+				return "", err
+			}
+		} else {
+			if err := runGit(repoRoot, "worktree", "add", "-b", branch, wtPath); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	if copyConfig {
+		if err := copyItems(mainWT, wtPath, defaultCopyConfigItems); err != nil {
+			return "", err
+		}
+		if err := copyMatchingFiles(mainWT, wtPath, defaultCopyConfigRecursive); err != nil {
+			return "", err
+		}
+	}
+	if copyLibs {
+		if err := copyItems(mainWT, wtPath, defaultCopyLibItems); err != nil {
+			return "", err
+		}
+	}
+
+	return wtPath, nil
 }
 
 func newCmd(args []string) {
@@ -48,41 +113,6 @@ func newCmd(args []string) {
 		die(errors.New("branch required"))
 	}
 
-	repoRoot, err := gitRepoRoot()
-	if err != nil {
-		die(err)
-	}
-
-	mainWT, err := gitMainWorktree(repoRoot)
-	if err != nil {
-		die(err)
-	}
-
-	wtPath := worktreePath(mainWT, branch)
-	if err := osMkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
-		die(err)
-	}
-
-	if *fromBranch != "" {
-		if err := runGit(repoRoot, "worktree", "add", "-b", branch, wtPath, *fromBranch); err != nil {
-			die(err)
-		}
-	} else {
-		exists, err := gitBranchExists(repoRoot, branch)
-		if err != nil {
-			die(err)
-		}
-		if exists {
-			if err := runGit(repoRoot, "worktree", "add", wtPath, branch); err != nil {
-				die(err)
-			}
-		} else {
-			if err := runGit(repoRoot, "worktree", "add", "-b", branch, wtPath); err != nil {
-				die(err)
-			}
-		}
-	}
-
 	if *noCopyConfig {
 		*copyConfig = false
 	}
@@ -90,18 +120,9 @@ func newCmd(args []string) {
 		*copyLibs = false
 	}
 
-	if *copyConfig {
-		if err := copyItems(mainWT, wtPath, defaultCopyConfigItems); err != nil {
-			die(err)
-		}
-		if err := copyMatchingFiles(mainWT, wtPath, defaultCopyConfigRecursive); err != nil {
-			die(err)
-		}
-	}
-	if *copyLibs {
-		if err := copyItems(mainWT, wtPath, defaultCopyLibItems); err != nil {
-			die(err)
-		}
+	wtPath, err := addWorktree(branch, *fromBranch, *copyConfig, *copyLibs)
+	if err != nil {
+		die(err)
 	}
 
 	fmt.Fprintln(stdout, wtPath)

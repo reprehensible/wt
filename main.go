@@ -18,6 +18,7 @@ var (
 	listCmdFn = listCmd
 	goCmdFn   = goCmd
 	tmuxCmdFn = tmuxCmd
+	jiraCmdFn = jiraCmd
 
 	newProgram = func(model tea.Model, opts ...tea.ProgramOption) programRunner {
 		return tea.NewProgram(model, opts...)
@@ -53,6 +54,8 @@ func main() {
 		goCmdFn(os.Args[2:])
 	case "t":
 		tmuxCmdFn(os.Args[2:])
+	case "jira":
+		jiraCmdFn(os.Args[2:])
 	case "-h", "--help", "help":
 		printUsage()
 	default:

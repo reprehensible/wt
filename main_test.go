@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -339,12 +342,14 @@ func TestMainDispatch(t *testing.T) {
 	oldList := listCmdFn
 	oldGo := goCmdFn
 	oldTmux := tmuxCmdFn
+	oldJira := jiraCmdFn
 	defer func() {
 		os.Args = oldArgs
 		newCmdFn = oldNew
 		listCmdFn = oldList
 		goCmdFn = oldGo
 		tmuxCmdFn = oldTmux
+		jiraCmdFn = oldJira
 	}()
 
 	calls := map[string]bool{}
@@ -352,8 +357,9 @@ func TestMainDispatch(t *testing.T) {
 	listCmdFn = func(args []string) { calls["list"] = true }
 	goCmdFn = func(args []string) { calls["go"] = true }
 	tmuxCmdFn = func(args []string) { calls["t"] = true }
+	jiraCmdFn = func(args []string) { calls["jira"] = true }
 
-	for _, cmd := range []string{"new", "list", "go", "t"} {
+	for _, cmd := range []string{"new", "list", "go", "t", "jira"} {
 		os.Args = []string{"wt", cmd}
 		main()
 		if !calls[cmd] {
@@ -4448,4 +4454,1001 @@ func TestTmuxCmdOpenTmuxError(t *testing.T) {
 	}()
 
 	tmuxCmd([]string{"main"})
+}
+
+// --- Jira tests ---
+
+func TestSlugify(t *testing.T) {
+	tests := []struct {
+		input  string
+		maxLen int
+		want   string
+	}{
+		{"Fix login timeout", 50, "fix-login-timeout"},
+		{"Hello, World! 123", 50, "hello-world-123"},
+		{"  --leading trailing--  ", 50, "leading-trailing"},
+		{"A very long title that should be truncated at word boundary here", 30, "a-very-long-title-that-should"},
+		{"", 50, ""},
+		{"---", 50, ""},
+	}
+	for _, tt := range tests {
+		got := slugify(tt.input, tt.maxLen)
+		if got != tt.want {
+			t.Errorf("slugify(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+		}
+	}
+}
+
+func TestJiraBranchName(t *testing.T) {
+	tests := []struct {
+		key     string
+		summary string
+		want    string
+	}{
+		{"PROJ-123", "Fix login timeout", "PROJ-123-fix-login-timeout"},
+		{"PROJ-456", "", "PROJ-456"},
+		{"PROJ-789", "---", "PROJ-789"},
+	}
+	for _, tt := range tests {
+		got := jiraBranchName(tt.key, tt.summary)
+		if got != tt.want {
+			t.Errorf("jiraBranchName(%q, %q) = %q, want %q", tt.key, tt.summary, got, tt.want)
+		}
+	}
+}
+
+func TestRenderIssueMD(t *testing.T) {
+	// Full issue
+	issue := jiraIssue{
+		Key: "PROJ-123",
+		Fields: jiraFields{
+			Summary:     "Fix login timeout",
+			Description: "Users see a timeout after 30s.",
+			Comment: jiraComments{
+				Comments: []jiraComment{
+					{
+						Author:  jiraAuthor{DisplayName: "Jane Smith"},
+						Body:    "I can reproduce this.",
+						Created: "2024-01-15T10:30:00.000+0000",
+					},
+				},
+			},
+		},
+	}
+	md := renderIssueMD(issue)
+	if !strings.Contains(md, "# PROJ-123: Fix login timeout") {
+		t.Fatalf("expected title in md: %s", md)
+	}
+	if !strings.Contains(md, "## Description") {
+		t.Fatalf("expected description section: %s", md)
+	}
+	if !strings.Contains(md, "## Comments") {
+		t.Fatalf("expected comments section: %s", md)
+	}
+	if !strings.Contains(md, "Jane Smith") {
+		t.Fatalf("expected author in md: %s", md)
+	}
+
+	// No description, no comments
+	issue2 := jiraIssue{
+		Key:    "PROJ-456",
+		Fields: jiraFields{Summary: "Simple bug"},
+	}
+	md2 := renderIssueMD(issue2)
+	if strings.Contains(md2, "## Description") {
+		t.Fatalf("expected no description section: %s", md2)
+	}
+	if strings.Contains(md2, "## Comments") {
+		t.Fatalf("expected no comments section: %s", md2)
+	}
+
+	// Description only
+	issue3 := jiraIssue{
+		Key:    "PROJ-789",
+		Fields: jiraFields{Summary: "With desc", Description: "Some desc"},
+	}
+	md3 := renderIssueMD(issue3)
+	if !strings.Contains(md3, "## Description") {
+		t.Fatalf("expected description: %s", md3)
+	}
+	if strings.Contains(md3, "## Comments") {
+		t.Fatalf("expected no comments: %s", md3)
+	}
+
+	// Comments only
+	issue4 := jiraIssue{
+		Key: "PROJ-000",
+		Fields: jiraFields{
+			Summary: "With comments",
+			Comment: jiraComments{
+				Comments: []jiraComment{
+					{Author: jiraAuthor{DisplayName: "Bob"}, Body: "test", Created: "2024-01-01T00:00:00.000+0000"},
+				},
+			},
+		},
+	}
+	md4 := renderIssueMD(issue4)
+	if strings.Contains(md4, "## Description") {
+		t.Fatalf("expected no description: %s", md4)
+	}
+	if !strings.Contains(md4, "## Comments") {
+		t.Fatalf("expected comments: %s", md4)
+	}
+}
+
+func TestJiraGetDefaultSuccess(t *testing.T) {
+	issue := jiraIssue{Key: "TEST-1", Fields: jiraFields{Summary: "Test"}}
+	body, _ := json.Marshal(issue)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "user" || pass != "token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	got, err := jiraGetDefault(srv.URL+"/rest/api/2/issue/TEST-1", "user", "token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("unexpected body: %s", string(got))
+	}
+}
+
+func TestJiraGetDefault404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := jiraGetDefault(srv.URL+"/rest/api/2/issue/NOPE-1", "user", "token")
+	if err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("expected 404 error, got %v", err)
+	}
+}
+
+func TestJiraGetDefault401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, err := jiraGetDefault(srv.URL+"/rest/api/2/issue/TEST-1", "bad", "creds")
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 error, got %v", err)
+	}
+}
+
+func TestJiraGetDefaultUnexpectedStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := jiraGetDefault(srv.URL+"/rest/api/2/issue/TEST-1", "user", "token")
+	if err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("expected 500 error, got %v", err)
+	}
+}
+
+func TestJiraGetDefaultNetworkError(t *testing.T) {
+	_, err := jiraGetDefault("http://127.0.0.1:1/bad", "user", "token")
+	if err == nil {
+		t.Fatalf("expected network error")
+	}
+}
+
+func TestJiraCmdSuccess(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	var writtenPath string
+	var writtenData []byte
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		writtenPath = name
+		writtenData = data
+		return nil
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraCmd([]string{"PROJ-123"})
+
+	wtPath := worktreePath(repo, "PROJ-123-fix-login")
+	if !strings.Contains(buf.String(), wtPath) {
+		t.Fatalf("expected wtPath in output, got %q", buf.String())
+	}
+	if writtenPath != filepath.Join(wtPath, "PROJ-123.md") {
+		t.Fatalf("expected md at %s, got %s", filepath.Join(wtPath, "PROJ-123.md"), writtenPath)
+	}
+	if !strings.Contains(string(writtenData), "# PROJ-123: Fix login") {
+		t.Fatalf("expected issue content in md, got %s", string(writtenData))
+	}
+}
+
+func TestJiraCmdBranchOverride(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraCmd([]string{"-b", "my-branch", "PROJ-123"})
+
+	wtPath := worktreePath(repo, "my-branch")
+	if !strings.Contains(buf.String(), wtPath) {
+		t.Fatalf("expected wtPath with custom branch in output, got %q", buf.String())
+	}
+}
+
+func TestJiraCmdTmux(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	oldTmuxEnv := os.Getenv("TMUX")
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+		_ = os.Setenv("TMUX", oldTmuxEnv)
+	}()
+
+	_ = os.Unsetenv("TMUX")
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	tmuxCalled := false
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "tmux" {
+			tmuxCalled = true
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraCmd([]string{"-t", "PROJ-123"})
+
+	if !tmuxCalled {
+		t.Fatalf("expected tmux to be called")
+	}
+}
+
+func TestJiraCmdMissingIssueKey(t *testing.T) {
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "issue key required") {
+			t.Fatalf("expected issue key error, got %q", buf.String())
+		}
+	}()
+
+	jiraCmd(nil)
+}
+
+func TestJiraCmdMissingEnvVars(t *testing.T) {
+	oldGetenv := osGetenv
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		osGetenv = oldGetenv
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osGetenv = func(key string) string { return "" }
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "JIRA_URL") {
+			t.Fatalf("expected env var error, got %q", buf.String())
+		}
+	}()
+
+	jiraCmd([]string{"PROJ-123"})
+}
+
+func TestJiraCmdAPIError(t *testing.T) {
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return nil, errors.New("jira: issue not found (404)")
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "404") {
+			t.Fatalf("expected 404 error, got %q", buf.String())
+		}
+	}()
+
+	jiraCmd([]string{"PROJ-123"})
+}
+
+func TestJiraCmdInvalidJSON(t *testing.T) {
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return []byte("not json"), nil
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "invalid response") {
+			t.Fatalf("expected invalid response error, got %q", buf.String())
+		}
+	}()
+
+	jiraCmd([]string{"PROJ-123"})
+}
+
+func TestJiraCmdWriteError(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		return errors.New("write fail")
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+		if !strings.Contains(buf.String(), "write fail") {
+			t.Fatalf("expected write error, got %q", buf.String())
+		}
+	}()
+
+	jiraCmd([]string{"PROJ-123"})
+}
+
+func TestJiraCmdAddWorktreeError(t *testing.T) {
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+	}()
+
+	jiraCmd([]string{"PROJ-123"})
+}
+
+func TestJiraCmdTmuxError(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldExit := exitFunc
+	oldErr := stderr
+	oldTmuxEnv := os.Getenv("TMUX")
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		exitFunc = oldExit
+		stderr = oldErr
+		_ = os.Setenv("TMUX", oldTmuxEnv)
+	}()
+
+	_ = os.Unsetenv("TMUX")
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "tmux" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+	}()
+
+	jiraCmd([]string{"-t", "PROJ-123"})
+}
+
+func TestJiraCmdTrailingSlashURL(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com/"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	var gotURL string
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Test"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		gotURL = url
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraCmd([]string{"PROJ-123"})
+
+	if strings.Contains(gotURL, "//rest") {
+		t.Fatalf("expected trailing slash stripped, got URL %q", gotURL)
+	}
+}
+
+func TestMainHelpIncludesJira(t *testing.T) {
+	oldErr := stderr
+	defer func() { stderr = oldErr }()
+
+	var buf bytes.Buffer
+	stderr = &buf
+	printUsage()
+
+	if !strings.Contains(buf.String(), "jira") {
+		t.Fatalf("expected jira in usage output, got %q", buf.String())
+	}
+}
+
+func TestAddWorktreeSuccess(t *testing.T) {
+	repo := t.TempDir()
+
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	wtPath, err := addWorktree("test-branch", "", true, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := worktreePath(repo, "test-branch")
+	if wtPath != expected {
+		t.Fatalf("expected %q, got %q", expected, wtPath)
+	}
+}
+
+func TestAddWorktreeRepoRootError(t *testing.T) {
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	_, err := addWorktree("test-branch", "", true, false)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestJiraCmdNoCopyConfig(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraCmd([]string{"-C", "PROJ-123"})
+
+	if buf.Len() == 0 {
+		t.Fatalf("expected output")
+	}
+}
+
+func TestJiraGetDefaultInvalidURL(t *testing.T) {
+	_, err := jiraGetDefault("://bad\x7f", "user", "token")
+	if err == nil {
+		t.Fatalf("expected error for invalid URL")
+	}
+}
+
+func TestJiraCmdNoCopyLibs(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldWriteFile := osWriteFile
+	oldOut := stdout
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		osWriteFile = oldWriteFile
+		stdout = oldOut
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	osWriteFile = func(name string, data []byte, perm fs.FileMode) error {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	stdout = &buf
+
+	jiraCmd([]string{"-L", "PROJ-123"})
+
+	if buf.Len() == 0 {
+		t.Fatalf("expected output")
+	}
 }

@@ -12,7 +12,7 @@ import (
 func setupTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	mustRunCmd(t, dir, "git", "init", "-b", "main")
+	mustRunCmd(t, dir, "git", "init")
 	mustRunCmd(t, dir, "git", "config", "user.email", "test@example.com")
 	mustRunCmd(t, dir, "git", "config", "user.name", "Test")
 	mustWriteFile(t, filepath.Join(dir, "file.txt"), "data")
