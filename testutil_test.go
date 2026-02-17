@@ -1,10 +1,14 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // setupTestRepo creates a new git repository with an initial commit.
@@ -87,4 +91,59 @@ func withDir(t *testing.T, dir string) func() {
 		t.Fatalf("chdir to %s: %v", dir, err)
 	}
 	return func() { _ = os.Chdir(oldWd) }
+}
+
+type stubProgram struct {
+	model tea.Model
+	err   error
+}
+
+func (s stubProgram) Run() (tea.Model, error) {
+	return s.model, s.err
+}
+
+type fakeDirEntry struct {
+	name    string
+	isDir   bool
+	infoErr error
+	mode    fs.FileMode
+}
+
+func (f fakeDirEntry) Name() string { return f.name }
+
+func (f fakeDirEntry) IsDir() bool { return f.isDir }
+
+func (f fakeDirEntry) Type() fs.FileMode { return f.mode }
+
+func (f fakeDirEntry) Info() (fs.FileInfo, error) { return fakeFileInfo{mode: f.mode}, f.infoErr }
+
+type fakeFileInfo struct {
+	mode fs.FileMode
+}
+
+func (f fakeFileInfo) Name() string { return "file" }
+
+func (f fakeFileInfo) Size() int64 { return 0 }
+
+func (f fakeFileInfo) Mode() fs.FileMode { return f.mode }
+
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+
+func (f fakeFileInfo) IsDir() bool { return false }
+
+func (f fakeFileInfo) Sys() any { return nil }
+
+func cmdWithOutput(out string) *exec.Cmd {
+	cmd := exec.Command("sh", "-c", "printf '%s' \"$WT_OUT\"")
+	cmd.Env = append(os.Environ(), "WT_OUT="+out)
+	return cmd
+}
+
+func contains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
