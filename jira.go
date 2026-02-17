@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,6 +18,7 @@ var (
 	osGetenv    = os.Getenv
 	osWriteFile = os.WriteFile
 	jiraGet     = jiraGetDefault
+	jiraPost    = jiraPostDefault
 )
 
 type jiraIssue struct {
@@ -28,6 +30,7 @@ type jiraFields struct {
 	Summary     string       `json:"summary"`
 	Description string       `json:"description"`
 	Comment     jiraComments `json:"comment"`
+	Status      jiraStatus   `json:"status"`
 }
 
 type jiraComments struct {
@@ -42,6 +45,20 @@ type jiraComment struct {
 
 type jiraAuthor struct {
 	DisplayName string `json:"displayName"`
+}
+
+type jiraStatus struct {
+	Name string `json:"name"`
+}
+
+type jiraTransition struct {
+	ID   string     `json:"id"`
+	Name string     `json:"name"`
+	To   jiraStatus `json:"to"`
+}
+
+type jiraTransitionsResponse struct {
+	Transitions []jiraTransition `json:"transitions"`
 }
 
 func jiraGetDefault(url, user, token string) ([]byte, error) {
@@ -72,6 +89,31 @@ func jiraGetDefault(url, user, token string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("jira: unexpected status %d", resp.StatusCode)
 	}
+}
+
+func jiraPostDefault(url, user, token string, body []byte) ([]byte, error) {
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(user, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("jira: unexpected status %d", resp.StatusCode)
+	}
+	return respBody, nil
 }
 
 var nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]+`)
@@ -121,8 +163,77 @@ func renderIssueMD(issue jiraIssue) string {
 	return b.String()
 }
 
+var issueKeyRe = regexp.MustCompile(`^([A-Z]+-\d+)`)
+
+func jiraIssueKeyFromBranch(branch string) string {
+	m := issueKeyRe.FindStringSubmatch(branch)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
+func jiraEnv() (string, string, string, error) {
+	jiraURL := osGetenv("JIRA_URL")
+	jiraUser := osGetenv("JIRA_USER")
+	jiraToken := osGetenv("JIRA_TOKEN")
+	if jiraURL == "" || jiraUser == "" || jiraToken == "" {
+		return "", "", "", errors.New("JIRA_URL, JIRA_USER, and JIRA_TOKEN must be set")
+	}
+	return strings.TrimRight(jiraURL, "/"), jiraUser, jiraToken, nil
+}
+
+func jiraFetchIssue(baseURL, issueKey, user, token string) (jiraIssue, error) {
+	apiURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,comment,status", baseURL, issueKey)
+	body, err := jiraGet(apiURL, user, token)
+	if err != nil {
+		return jiraIssue{}, err
+	}
+	var issue jiraIssue
+	if err := json.Unmarshal(body, &issue); err != nil {
+		return jiraIssue{}, fmt.Errorf("jira: invalid response: %w", err)
+	}
+	return issue, nil
+}
+
+func jiraSetStatus(baseURL, issueKey, statusName, user, token string) error {
+	tURL := fmt.Sprintf("%s/rest/api/2/issue/%s/transitions", baseURL, issueKey)
+	body, err := jiraGet(tURL, user, token)
+	if err != nil {
+		return err
+	}
+	var tr jiraTransitionsResponse
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return fmt.Errorf("jira: invalid transitions response: %w", err)
+	}
+	for _, t := range tr.Transitions {
+		if strings.EqualFold(t.To.Name, statusName) {
+			payload, _ := json.Marshal(map[string]any{
+				"transition": map[string]string{"id": t.ID},
+			})
+			_, err := jiraPost(tURL, user, token, payload)
+			return err
+		}
+	}
+	return fmt.Errorf("jira: no transition to %q available", statusName)
+}
+
 func jiraCmd(args []string) {
-	fs := flag.NewFlagSet("jira", flag.ExitOnError)
+	if len(args) == 0 {
+		die(errors.New("usage: wt jira <new|status> ..."))
+	}
+	switch args[0] {
+	case "new":
+		jiraNewCmd(args[1:])
+	case "status":
+		jiraStatusCmd(args[1:])
+	default:
+		die(fmt.Errorf("unknown jira command: %s", args[0]))
+	}
+}
+
+func jiraNewCmd(args []string) {
+	fs := flag.NewFlagSet("jira new", flag.ExitOnError)
 	tmux := fs.Bool("t", false, "open worktree in tmux after creation")
 	branch := fs.String("branch", "", "override branch name")
 	fs.StringVar(branch, "b", "", "override branch name")
@@ -146,25 +257,14 @@ func jiraCmd(args []string) {
 		die(errors.New("issue key required (e.g. PROJ-123)"))
 	}
 
-	jiraURL := osGetenv("JIRA_URL")
-	jiraUser := osGetenv("JIRA_USER")
-	jiraToken := osGetenv("JIRA_TOKEN")
-
-	if jiraURL == "" || jiraUser == "" || jiraToken == "" {
-		die(errors.New("JIRA_URL, JIRA_USER, and JIRA_TOKEN must be set"))
-	}
-
-	jiraURL = strings.TrimRight(jiraURL, "/")
-	apiURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,comment", jiraURL, issueKey)
-
-	body, err := jiraGet(apiURL, jiraUser, jiraToken)
+	baseURL, user, token, err := jiraEnv()
 	if err != nil {
 		die(err)
 	}
 
-	var issue jiraIssue
-	if err := json.Unmarshal(body, &issue); err != nil {
-		die(fmt.Errorf("jira: invalid response: %w", err))
+	issue, err := jiraFetchIssue(baseURL, issueKey, user, token)
+	if err != nil {
+		die(err)
 	}
 
 	branchName := *branch
@@ -195,6 +295,66 @@ func jiraCmd(args []string) {
 	if *tmux {
 		if err := openTmux(wtPath); err != nil {
 			die(err)
+		}
+	}
+}
+
+func jiraStatusCmd(args []string) {
+	issueKey := ""
+	statusName := ""
+
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		issueKey = args[0]
+		args = args[1:]
+	}
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		statusName = args[0]
+	}
+
+	if issueKey == "" {
+		branch, err := runGitOutput("", "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			die(fmt.Errorf("jira: could not determine current branch: %w", err))
+		}
+		issueKey = jiraIssueKeyFromBranch(strings.TrimSpace(branch))
+		if issueKey == "" {
+			die(errors.New("jira: current branch does not contain an issue key"))
+		}
+	}
+
+	baseURL, user, token, err := jiraEnv()
+	if err != nil {
+		die(err)
+	}
+
+	if statusName != "" {
+		if err := jiraSetStatus(baseURL, issueKey, statusName, user, token); err != nil {
+			die(err)
+		}
+		fmt.Fprintf(stdout, "%s → %s\n", issueKey, statusName)
+		return
+	}
+
+	issue, err := jiraFetchIssue(baseURL, issueKey, user, token)
+	if err != nil {
+		die(err)
+	}
+
+	fmt.Fprintf(stdout, "%s: %s\n", issue.Key, issue.Fields.Status.Name)
+
+	tURL := fmt.Sprintf("%s/rest/api/2/issue/%s/transitions", baseURL, issueKey)
+	body, err := jiraGet(tURL, user, token)
+	if err != nil {
+		die(err)
+	}
+	var tr jiraTransitionsResponse
+	if err := json.Unmarshal(body, &tr); err != nil {
+		die(fmt.Errorf("jira: invalid transitions response: %w", err))
+	}
+	if len(tr.Transitions) > 0 {
+		fmt.Fprintln(stdout, "\nAvailable transitions:")
+		for _, t := range tr.Transitions {
+			fmt.Fprintf(stdout, "  %s\n", t.To.Name)
 		}
 	}
 }
