@@ -17,6 +17,7 @@ const (
 	tuiStateInputBranchName
 	tuiStateConfirmNewBranch
 	tuiStateBusy
+	tuiStateHelp
 )
 
 const (
