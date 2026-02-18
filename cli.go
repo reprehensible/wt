@@ -4,8 +4,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
 )
 
 func printUsage() {
@@ -46,59 +44,6 @@ func printUsage() {
 	fmt.Fprintln(stderr, "jira env vars: JIRA_URL, JIRA_USER, JIRA_TOKEN")
 }
 
-func addWorktree(branch, fromBranch string, copyConfig, copyLibs bool) (string, error) {
-	repoRoot, err := gitRepoRoot()
-	if err != nil {
-		return "", err
-	}
-
-	mainWT, err := gitMainWorktree(repoRoot)
-	if err != nil {
-		return "", err
-	}
-
-	wtPath := worktreePath(mainWT, branch)
-	if err := osMkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
-		return "", err
-	}
-
-	if fromBranch != "" {
-		if err := runGit(repoRoot, "worktree", "add", "-b", branch, wtPath, fromBranch); err != nil {
-			return "", err
-		}
-	} else {
-		exists, err := gitBranchExists(repoRoot, branch)
-		if err != nil {
-			return "", err
-		}
-		if exists {
-			if err := runGit(repoRoot, "worktree", "add", wtPath, branch); err != nil {
-				return "", err
-			}
-		} else {
-			if err := runGit(repoRoot, "worktree", "add", "-b", branch, wtPath); err != nil {
-				return "", err
-			}
-		}
-	}
-
-	if copyConfig {
-		if err := copyItems(mainWT, wtPath, defaultCopyConfigItems); err != nil {
-			return "", err
-		}
-		if err := copyMatchingFiles(mainWT, wtPath, defaultCopyConfigRecursive); err != nil {
-			return "", err
-		}
-	}
-	if copyLibs {
-		if err := copyItems(mainWT, wtPath, defaultCopyLibItems); err != nil {
-			return "", err
-		}
-	}
-
-	return wtPath, nil
-}
-
 func newCmd(args []string) {
 	fs := flag.NewFlagSet("new", flag.ExitOnError)
 	copyConfig := fs.Bool("copy-config", true, "copy config files")
@@ -128,7 +73,16 @@ func newCmd(args []string) {
 		*copyLibs = false
 	}
 
-	wtPath, err := addWorktree(branch, *fromBranch, *copyConfig, *copyLibs)
+	repoRoot, err := gitRepoRoot()
+	if err != nil {
+		die(err)
+	}
+	mainWT, err := gitMainWorktree(repoRoot)
+	if err != nil {
+		die(err)
+	}
+
+	wtPath, err := addWorktree(repoRoot, mainWT, branch, *fromBranch, *copyConfig, *copyLibs)
 	if err != nil {
 		die(err)
 	}
@@ -177,31 +131,9 @@ func goCmd(args []string) {
 		die(err)
 	}
 
-	wts, err := gitWorktrees(repoRoot)
+	targetPath, err := findWorktree(repoRoot, name)
 	if err != nil {
 		die(err)
-	}
-	if len(wts) == 0 {
-		die(errors.New("no worktrees found"))
-	}
-
-	var targetPath string
-	for _, wt := range wts {
-		if wt.Branch == name {
-			targetPath = wt.Path
-			break
-		}
-		if filepath.Base(wt.Path) == name {
-			targetPath = wt.Path
-			break
-		}
-		if wt.Path == name {
-			targetPath = wt.Path
-			break
-		}
-	}
-	if targetPath == "" {
-		die(fmt.Errorf("worktree not found: %s", name))
 	}
 
 	if err := openShell(targetPath); err != nil {
@@ -226,99 +158,14 @@ func tmuxCmd(args []string) {
 		die(err)
 	}
 
-	wts, err := gitWorktrees(repoRoot)
+	targetPath, err := findWorktree(repoRoot, name)
 	if err != nil {
 		die(err)
-	}
-	if len(wts) == 0 {
-		die(errors.New("no worktrees found"))
-	}
-
-	var targetPath string
-	for _, wt := range wts {
-		if wt.Branch == name {
-			targetPath = wt.Path
-			break
-		}
-		if filepath.Base(wt.Path) == name {
-			targetPath = wt.Path
-			break
-		}
-		if wt.Path == name {
-			targetPath = wt.Path
-			break
-		}
-	}
-	if targetPath == "" {
-		die(fmt.Errorf("worktree not found: %s", name))
 	}
 
 	if err := openTmux(targetPath); err != nil {
 		die(err)
 	}
-}
-
-func openTmux(targetPath string) error {
-	sessionName := filepath.Base(targetPath)
-
-	// Check if session already exists
-	checkCmd := execCommand("tmux", "has-session", "-t", sessionName)
-	sessionExists := checkCmd.Run() == nil
-
-	inTmux := os.Getenv("TMUX") != ""
-
-	if !sessionExists {
-		// Create a new session
-		if inTmux {
-			// Create detached, then switch
-			cmd := execCommand("tmux", "new-session", "-d", "-s", sessionName, "-c", targetPath)
-			cmd.Stdin = stdin
-			cmd.Stdout = stdout
-			cmd.Stderr = stderr
-			if err := cmd.Run(); err != nil {
-				return err
-			}
-			cmd = execCommand("tmux", "switch-client", "-t", sessionName)
-			cmd.Stdin = stdin
-			cmd.Stdout = stdout
-			cmd.Stderr = stderr
-			return cmd.Run()
-		}
-		// Not in tmux: create and attach
-		cmd := execCommand("tmux", "new-session", "-s", sessionName, "-c", targetPath)
-		cmd.Stdin = stdin
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		return cmd.Run()
-	}
-
-	// Session exists
-	if inTmux {
-		cmd := execCommand("tmux", "switch-client", "-t", sessionName)
-		cmd.Stdin = stdin
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		return cmd.Run()
-	}
-	cmd := execCommand("tmux", "attach-session", "-t", sessionName)
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	return cmd.Run()
-}
-
-func openShell(targetPath string) error {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
-
-	cmd := execCommand(shell)
-	cmd.Dir = targetPath
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	return cmd.Run()
 }
 
 func die(err error) {

@@ -291,7 +291,16 @@ func jiraNewCmd(args []string) {
 		*copyLibs = false
 	}
 
-	wtPath, err := addWorktree(branchName, *fromBranch, *copyConfig, *copyLibs)
+	repoRoot, err := gitRepoRoot()
+	if err != nil {
+		die(err)
+	}
+	mainWT, err := gitMainWorktree(repoRoot)
+	if err != nil {
+		die(err)
+	}
+
+	wtPath, err := addWorktree(repoRoot, mainWT, branchName, *fromBranch, *copyConfig, *copyLibs)
 	if err != nil {
 		die(err)
 	}
