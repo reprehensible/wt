@@ -455,46 +455,8 @@ func (m tuiModel) startDelete() (tea.Model, tea.Cmd) {
 
 func (m tuiModel) createWorktree() error {
 	branch := strings.TrimSpace(m.pendingBranch)
-	if branch == "" {
-		return errors.New("no branch selected")
-	}
-	wtPath := worktreePath(m.mainWorktree, branch)
-	if err := osMkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
-		return err
-	}
-	if m.baseBranch != "" {
-		if err := runGit(m.repoRoot, "worktree", "add", "-b", branch, wtPath, m.baseBranch); err != nil {
-			return err
-		}
-	} else {
-		exists, err := gitBranchExists(m.repoRoot, branch)
-		if err != nil {
-			return err
-		}
-		if exists {
-			if err := runGit(m.repoRoot, "worktree", "add", wtPath, branch); err != nil {
-				return err
-			}
-		} else {
-			if err := runGit(m.repoRoot, "worktree", "add", "-b", branch, wtPath); err != nil {
-				return err
-			}
-		}
-	}
-	if m.copyConfig {
-		if err := copyItems(m.mainWorktree, wtPath, defaultCopyConfigItems); err != nil {
-			return err
-		}
-		if err := copyMatchingFiles(m.mainWorktree, wtPath, defaultCopyConfigRecursive); err != nil {
-			return err
-		}
-	}
-	if m.copyLibs {
-		if err := copyItems(m.mainWorktree, wtPath, defaultCopyLibItems); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := addWorktree(m.repoRoot, m.mainWorktree, branch, m.baseBranch, m.copyConfig, m.copyLibs)
+	return err
 }
 
 func (m *tuiModel) reloadWorktrees() error {
@@ -553,7 +515,7 @@ func deleteWorktreeCmd(m tuiModel) tea.Cmd {
 	path := m.pendingDelete.path
 	repoRoot := m.repoRoot
 	return func() tea.Msg {
-		return deleteResultMsg{err: runGit(repoRoot, "worktree", "remove", path)}
+		return deleteResultMsg{err: removeWorktree(repoRoot, path)}
 	}
 }
 

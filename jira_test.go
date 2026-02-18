@@ -625,7 +625,7 @@ func TestJiraCmdWriteError(t *testing.T) {
 	jiraCmd([]string{"new", "PROJ-123"})
 }
 
-func TestJiraCmdAddWorktreeError(t *testing.T) {
+func TestJiraCmdRepoRootError(t *testing.T) {
 	oldGetenv := osGetenv
 	oldJiraGet := jiraGet
 	oldExec := execCommand
@@ -658,6 +658,128 @@ func TestJiraCmdAddWorktreeError(t *testing.T) {
 	}
 
 	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+	}()
+
+	jiraCmd([]string{"new", "PROJ-123"})
+}
+
+func TestJiraCmdAddWorktreeError(t *testing.T) {
+	repo := t.TempDir()
+
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput(repo)
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "add" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		if len(args) >= 2 && args[0] == "show-ref" {
+			return exec.Command("sh", "-c", "exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	var buf bytes.Buffer
+	stderr = &buf
+	exitFunc = func(code int) { panic(code) }
+
+	defer func() {
+		if r := recover(); r != 1 {
+			t.Fatalf("expected exit 1, got %v", r)
+		}
+	}()
+
+	jiraCmd([]string{"new", "PROJ-123"})
+}
+
+func TestJiraCmdMainWorktreeError(t *testing.T) {
+	oldGetenv := osGetenv
+	oldJiraGet := jiraGet
+	oldExec := execCommand
+	oldExit := exitFunc
+	oldErr := stderr
+	defer func() {
+		osGetenv = oldGetenv
+		jiraGet = oldJiraGet
+		execCommand = oldExec
+		exitFunc = oldExit
+		stderr = oldErr
+	}()
+
+	osGetenv = func(key string) string {
+		switch key {
+		case "JIRA_URL":
+			return "https://jira.example.com"
+		case "JIRA_USER":
+			return "user"
+		case "JIRA_TOKEN":
+			return "token"
+		}
+		return ""
+	}
+
+	issue := jiraIssue{Key: "PROJ-123", Fields: jiraFields{Summary: "Fix login"}}
+	body, _ := json.Marshal(issue)
+	jiraGet = func(url, user, token string) ([]byte, error) {
+		return body, nil
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			return cmdWithOutput("/repo")
+		}
+		// worktree list fails → gitMainWorktree error
 		return exec.Command("sh", "-c", "exit 1")
 	}
 
@@ -839,19 +961,13 @@ func TestAddWorktreeSuccess(t *testing.T) {
 		if len(args) > 0 && args[0] == "-C" {
 			args = args[2:]
 		}
-		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
-			return cmdWithOutput(repo)
-		}
-		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
-			return cmdWithOutput(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", repo))
-		}
 		if len(args) >= 2 && args[0] == "show-ref" {
 			return exec.Command("sh", "-c", "exit 1")
 		}
 		return exec.Command("sh", "-c", "exit 0")
 	}
 
-	wtPath, err := addWorktree("test-branch", "", true, false)
+	wtPath, err := addWorktree(repo, repo, "test-branch", "", true, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -861,15 +977,8 @@ func TestAddWorktreeSuccess(t *testing.T) {
 	}
 }
 
-func TestAddWorktreeRepoRootError(t *testing.T) {
-	oldExec := execCommand
-	defer func() { execCommand = oldExec }()
-
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		return exec.Command("sh", "-c", "exit 1")
-	}
-
-	_, err := addWorktree("test-branch", "", true, false)
+func TestAddWorktreeEmptyBranch(t *testing.T) {
+	_, err := addWorktree("/repo", "/repo", "", "", true, false)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
