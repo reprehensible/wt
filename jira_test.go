@@ -1217,6 +1217,30 @@ func TestJiraDispatcher(t *testing.T) {
 	}
 }
 
+func TestJiraCmdHelp(t *testing.T) {
+	oldErr := stderr
+	defer func() { stderr = oldErr }()
+
+	var buf bytes.Buffer
+	stderr = &buf
+	jiraCmd([]string{"--help"})
+	if !strings.Contains(buf.String(), "usage: wt jira") {
+		t.Fatalf("expected jira usage, got %q", buf.String())
+	}
+}
+
+func TestJiraStatusCmdHelp(t *testing.T) {
+	oldErr := stderr
+	defer func() { stderr = oldErr }()
+
+	var buf bytes.Buffer
+	stderr = &buf
+	jiraStatusCmd([]string{"--help"})
+	if !strings.Contains(buf.String(), "usage: wt jira status") {
+		t.Fatalf("expected jira status usage, got %q", buf.String())
+	}
+}
+
 func TestJiraIssueKeyFromBranch(t *testing.T) {
 	tests := []struct {
 		branch string

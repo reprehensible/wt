@@ -147,6 +147,20 @@ func TestListCmdArgs(t *testing.T) {
 	listCmd([]string{"extra"})
 }
 
+func TestListCmdHelp(t *testing.T) {
+	oldErr := stderr
+	defer func() { stderr = oldErr }()
+
+	for _, arg := range []string{"-h", "--help", "help"} {
+		var buf bytes.Buffer
+		stderr = &buf
+		listCmd([]string{arg})
+		if !strings.Contains(buf.String(), "usage: wt list") {
+			t.Fatalf("expected list usage for %q, got %q", arg, buf.String())
+		}
+	}
+}
+
 func TestListCmdRepoRootError(t *testing.T) {
 	oldExec := execCommand
 	oldExit := exitFunc

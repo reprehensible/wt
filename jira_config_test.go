@@ -1349,11 +1349,18 @@ func TestMainHelpIncludesConfig(t *testing.T) {
 	if !strings.Contains(buf.String(), "jira config") {
 		t.Fatalf("expected jira config in usage output, got %q", buf.String())
 	}
-	if !strings.Contains(buf.String(), "--dry-run") {
-		t.Fatalf("expected --dry-run in usage output, got %q", buf.String())
-	}
+
+	// Detailed flags are in per-command help, not top-level
+	buf.Reset()
+	printJiraConfigUsage()
 	if !strings.Contains(buf.String(), "--init") {
-		t.Fatalf("expected --init in usage output, got %q", buf.String())
+		t.Fatalf("expected --init in jira config help, got %q", buf.String())
+	}
+
+	buf.Reset()
+	printJiraStatusUsage()
+	if !strings.Contains(buf.String(), "--dry-run") {
+		t.Fatalf("expected --dry-run in jira status help, got %q", buf.String())
 	}
 }
 
