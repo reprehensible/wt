@@ -54,6 +54,11 @@ type deleteResultMsg struct {
 	err error
 }
 
+type branchesResultMsg struct {
+	branches []string
+	err      error
+}
+
 func runTUI() (tuiAction, error) {
 	repoRoot, err := gitRepoRoot()
 	if err != nil {
@@ -68,6 +73,9 @@ func runTUI() (tuiAction, error) {
 	p := newProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
+		if errors.Is(err, tea.ErrProgramKilled) {
+			return tuiAction{}, nil
+		}
 		return tuiAction{}, err
 	}
 	return finalModel.(tuiModel).action, nil
@@ -109,20 +117,34 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		innerW := msg.Width - 2 // frame border left + right
-		// Reserve lines for: frame border(2), title(1), help(1), status(1)
-		baseOverhead := 5
 		switch m.state {
 		case tuiStateList:
-			m.list.SetSize(innerW, msg.Height-baseOverhead-1) // extra 1 for column header
+			// Reserve: frame(2) + title(1) + column header(1) + footer(1) + status(1)
+			innerH := msg.Height - 6
+			if nItems := len(m.list.Items()); nItems+2 < innerH {
+				innerH = nItems + 2
+			}
+			m.list.SetSize(innerW, innerH)
 		case tuiStateNewBranch:
-			m.branches.SetSize(innerW, msg.Height-baseOverhead)
+			// Reserve: frame(2) + title(1) + footer(1) + status(1)
+			innerH := msg.Height - 5
+			if nItems := len(m.branches.Items()); nItems+2 < innerH {
+				innerH = nItems + 2
+			}
+			m.branches.SetSize(innerW, innerH)
 		}
 	case tea.KeyMsg:
 		if m.state == tuiStateBusy {
 			return m, nil
 		}
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "q":
+			if m.isFiltering() || m.state == tuiStateInputBranchName {
+				break
+			}
+			m.action = tuiAction{kind: tuiActionNone}
+			return m, tea.Quit
+		case "ctrl+c":
 			m.action = tuiAction{kind: tuiActionNone}
 			return m, tea.Quit
 		}
@@ -152,6 +174,33 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = tuiStateList
 		m.busyText = ""
 		return m, nil
+	case branchesResultMsg:
+		m.busyText = ""
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			m.state = tuiStateList
+			return m, nil
+		}
+		if len(msg.branches) == 0 {
+			m.status = "no branches found"
+			m.state = tuiStateList
+			return m, nil
+		}
+		items := make([]list.Item, 0, len(msg.branches))
+		for _, branch := range msg.branches {
+			items = append(items, branchItem(branch))
+		}
+		m.branches = newListModel("Select branch", items)
+		if m.width > 0 && m.height > 0 {
+			innerH := m.height - 5
+			if nItems := len(msg.branches); nItems+2 < innerH {
+				innerH = nItems + 2
+			}
+			m.branches.SetSize(m.width-2, innerH)
+		}
+		m.state = tuiStateNewBranch
+		m.status = ""
+		return m, nil
 	}
 
 	switch m.state {
@@ -169,6 +218,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateInputBranchName(msg)
 	case tuiStateConfirmNewBranch:
 		return m.updateConfirmNewBranch(msg)
+	case tuiStateHelp:
+		return m.updateHelp(msg)
 	case tuiStateBusy:
 		return m, nil
 	default:
@@ -179,27 +230,33 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m tuiModel) View() string {
 	switch m.state {
 	case tuiStateList:
-		return renderFramed(m.listContent(), listFooter(), m.status, m.width)
+		return renderFramed(m.listContent(), listFooter(m.width), m.status, m.width)
 	case tuiStateNewBranch:
 		title := titleStyle.Render("Select branch")
 		content := title + "\n" + m.branches.View()
-		return renderFramed(content, branchFooter(), m.status, m.width)
+		return renderFramed(content, branchFooter(m.width), m.status, m.width)
 	case tuiStatePromptConfig:
-		return promptView("Copy config files?", true, m.status)
+		return promptView("Copy config files?", true, m.status, m.width)
 	case tuiStatePromptLibs:
-		return promptView("Copy libs (node_modules)?", false, m.status)
+		return promptView("Copy libs (node_modules)?", false, m.status, m.width)
 	case tuiStateConfirmDelete:
-		return promptView("Remove selected worktree?", false, m.status)
+		name := m.pendingDelete.branch
+		if name == "" {
+			name = filepath.Base(m.pendingDelete.path)
+		}
+		return promptView(fmt.Sprintf("Remove worktree %q?", name), false, m.status, m.width)
 	case tuiStateInputBranchName:
 		prompt := fmt.Sprintf("New branch name (from %s):", m.baseBranch)
 		content := prompt + "\n" + m.input.View()
 		return renderFramed(content, "enter: confirm  esc: back", m.status, m.width)
 	case tuiStateConfirmNewBranch:
 		prompt := fmt.Sprintf("Create new branch %s from %s?", m.pendingBranch, m.baseBranch)
-		return promptView(prompt, true, m.status)
+		return promptView(prompt, true, m.status, m.width)
 	case tuiStateBusy:
 		status := fmt.Sprintf("%s %s", m.spinner.View(), m.busyText)
-		return renderFramed(m.listContent(), listFooter(), status, m.width)
+		return renderFramed(m.listContent(), listFooter(m.width), status, m.width)
+	case tuiStateHelp:
+		return renderFramed(helpContent(), "press any key to close", "", m.width)
 	default:
 		return ""
 	}
@@ -265,27 +322,10 @@ func (m tuiModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				}
 			case "n":
-				branches, err := gitBranches(m.repoRoot)
-				if err != nil {
-					m.status = err.Error()
-					return m, nil
-				}
-				if len(branches) == 0 {
-					m.status = "no branches found"
-					return m, nil
-				}
-				ordered := orderByRecentCommit(branches, m.repoRoot, "branches")
-				items := make([]list.Item, 0, len(ordered))
-				for _, branch := range ordered {
-					items = append(items, branchItem(branch))
-				}
-				m.branches = newListModel("Select branch", items)
-				if m.width > 0 {
-					m.branches.SetSize(m.width-2, m.height-5)
-				}
-				m.state = tuiStateNewBranch
+				m.state = tuiStateBusy
+				m.busyText = "loading branches..."
 				m.status = ""
-				return m, nil
+				return m, tea.Batch(m.spinner.Tick, loadBranchesCmd(m.repoRoot))
 			case "d":
 				item := selectedWorktree(m.list)
 				if item.path == "" {
@@ -302,6 +342,10 @@ func (m tuiModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.pendingDelete = item
 				m.state = tuiStateConfirmDelete
+				m.status = ""
+				return m, nil
+			case "?":
+				m.state = tuiStateHelp
 				return m, nil
 			}
 		}
@@ -326,6 +370,7 @@ func (m tuiModel) updateBranchList(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.copyConfig = true
 					m.copyLibs = false
 					m.state = tuiStatePromptConfig
+					m.status = ""
 					return m, nil
 				}
 			case "c":
@@ -336,8 +381,12 @@ func (m tuiModel) updateBranchList(msg tea.Msg) (tea.Model, tea.Cmd) {
 					ti.Focus()
 					m.input = ti
 					m.state = tuiStateInputBranchName
+					m.status = ""
 					return m, nil
 				}
+			case "?":
+				m.state = tuiStateHelp
+				return m, nil
 			}
 		}
 	}
@@ -432,6 +481,7 @@ func (m tuiModel) updateConfirmNewBranch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copyConfig = true
 		m.copyLibs = false
 		m.state = tuiStatePromptConfig
+		m.status = ""
 	case "n", "N", "esc":
 		m.baseBranch = ""
 		m.pendingBranch = ""
@@ -467,6 +517,13 @@ func (m *tuiModel) reloadWorktrees() error {
 	items, maxLen := buildWorktreeItems(wts)
 	m.list.SetItems(items)
 	m.maxBranchLen = maxLen
+	if m.width > 0 && m.height > 0 {
+		innerH := m.height - 6
+		if nItems := len(items); nItems+2 < innerH {
+			innerH = nItems + 2
+		}
+		m.list.SetSize(m.width-2, innerH)
+	}
 	return nil
 }
 
@@ -537,13 +594,13 @@ func newListModel(title string, items []list.Item) list.Model {
 	return l
 }
 
-func promptView(prompt string, defaultYes bool, status string) string {
+func promptView(prompt string, defaultYes bool, status string, width int) string {
 	choice := "[y/N]"
 	if defaultYes {
 		choice = "[Y/n]"
 	}
-	line := fmt.Sprintf("%s %s", prompt, choice)
-	return withStatus(line+"\n\n(enter to accept default, esc to cancel)", status)
+	content := fmt.Sprintf("%s %s", prompt, choice)
+	return renderFramed(content, "enter: accept default  esc: cancel", status, width)
 }
 
 func withFooter(body, footer, status string) string {
@@ -561,12 +618,20 @@ func withStatus(body, status string) string {
 	return body + "\n\n" + status
 }
 
-func listFooter() string {
-	return "enter: go  t: tmux  n: new  d: delete  /: filter  q: quit"
+func listFooter(width int) string {
+	full := "enter: go  t: tmux  n: new  d: delete  /: filter  ?: help  q: quit"
+	if width > 0 && width < len(full)+2 {
+		return "↵:go t:tmux n:new d:del /:filter ?:help q:quit"
+	}
+	return full
 }
 
-func branchFooter() string {
-	return "enter: select  c: create  esc: back  /: filter"
+func branchFooter(width int) string {
+	full := "enter: select  c: create  esc: back  /: filter  ?: help"
+	if width > 0 && width < len(full)+2 {
+		return "↵:select c:create esc:back /:filter ?:help"
+	}
+	return full
 }
 
 const listEllipsis = "..."
@@ -636,6 +701,53 @@ func (d denseDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 		return
 	}
 	fmt.Fprintf(w, "%s", title) //nolint:errcheck
+}
+
+func (m tuiModel) isFiltering() bool {
+	switch m.state {
+	case tuiStateList:
+		return m.list.FilterState() == list.Filtering
+	case tuiStateNewBranch:
+		return m.branches.FilterState() == list.Filtering
+	}
+	return false
+}
+
+func (m tuiModel) updateHelp(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(tea.KeyMsg); ok {
+		m.state = tuiStateList
+		return m, nil
+	}
+	return m, nil
+}
+
+func helpContent() string {
+	return titleStyle.Render("Keyboard Shortcuts") + "\n\n" +
+		"  Worktree List\n" +
+		"  enter    Open shell in worktree\n" +
+		"  t        Open tmux session\n" +
+		"  n        Create new worktree\n" +
+		"  d        Delete worktree\n" +
+		"  /        Filter list\n" +
+		"  j/k      Navigate up/down\n" +
+		"  ?        Show this help\n" +
+		"  q        Quit\n\n" +
+		"  Branch Selection\n" +
+		"  enter    Select branch\n" +
+		"  c        Create new branch\n" +
+		"  /        Filter branches\n" +
+		"  esc      Go back"
+}
+
+func loadBranchesCmd(repoRoot string) tea.Cmd {
+	return func() tea.Msg {
+		branches, err := gitBranches(repoRoot)
+		if err != nil {
+			return branchesResultMsg{err: err}
+		}
+		ordered := orderByRecentCommit(branches, repoRoot, "branches")
+		return branchesResultMsg{branches: ordered}
+	}
 }
 
 func exactMatchFilter(term string, targets []string) []list.Rank {

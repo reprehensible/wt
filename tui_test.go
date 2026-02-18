@@ -360,8 +360,12 @@ func TestSelectedWorktree(t *testing.T) {
 }
 
 func TestPromptView(t *testing.T) {
-	out := promptView("Copy config files?", true, "status")
+	out := promptView("Copy config files?", true, "status", 80)
 	if !strings.Contains(out, "Copy config files?") || !strings.Contains(out, "status") {
+		t.Fatalf("unexpected prompt output: %q", out)
+	}
+	out = promptView("Confirm?", false, "", 0)
+	if !strings.Contains(out, "Confirm?") || !strings.Contains(out, "[y/N]") {
 		t.Fatalf("unexpected prompt output: %q", out)
 	}
 }
@@ -381,8 +385,17 @@ func TestWithFooter(t *testing.T) {
 }
 
 func TestFooters(t *testing.T) {
-	if listFooter() == "" || branchFooter() == "" {
+	if listFooter(0) == "" || branchFooter(0) == "" {
 		t.Fatalf("expected footers")
+	}
+	// Compact footers for narrow widths
+	narrow := listFooter(30)
+	if !strings.Contains(narrow, "quit") {
+		t.Fatalf("expected compact footer, got %q", narrow)
+	}
+	narrow = branchFooter(30)
+	if !strings.Contains(narrow, "help") {
+		t.Fatalf("expected compact footer, got %q", narrow)
 	}
 }
 
@@ -530,30 +543,22 @@ func TestTUIListUpdateFilterInput(t *testing.T) {
 }
 
 func TestTUIBranchFlow(t *testing.T) {
-	repo := t.TempDir()
-
-	oldExec := execCommand
-	defer func() { execCommand = oldExec }()
-
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		if len(args) > 0 && args[0] == "-C" {
-			args = args[2:]
-		}
-		if len(args) >= 2 && args[0] == "branch" {
-			return cmdWithOutput("main\nfeature")
-		}
-		return exec.Command("sh", "-c", "exit 0")
-	}
-
 	model := tuiModel{
 		state:    tuiStateList,
-		repoRoot: repo,
+		repoRoot: "/repo",
 		list:     newListModel("Worktrees", nil),
 		width:    100,
 		height:   40,
 	}
+	// Press 'n' - should go to busy state for async loading
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	updated := next.(tuiModel)
+	if updated.state != tuiStateBusy {
+		t.Fatalf("expected busy state, got %v", updated.state)
+	}
+	// Simulate branch loading result
+	next, _ = updated.Update(branchesResultMsg{branches: []string{"main", "feature"}})
+	updated = next.(tuiModel)
 	if updated.state != tuiStateNewBranch {
 		t.Fatalf("expected branch selection state")
 	}
@@ -1052,44 +1057,43 @@ func TestTUIFinishCreateError(t *testing.T) {
 }
 
 func TestTUIBranchErrors(t *testing.T) {
-	oldExec := execCommand
-	defer func() { execCommand = oldExec }()
-
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		return exec.Command("sh", "-c", "exit 1")
-	}
 	model := tuiModel{
 		state:    tuiStateList,
 		repoRoot: "/repo",
 		list:     newListModel("Worktrees", nil),
 	}
+	// Press 'n' - goes to busy state
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	updated := next.(tuiModel)
+	if updated.state != tuiStateBusy {
+		t.Fatalf("expected busy state")
+	}
+	// Simulate branch loading error
+	next, _ = updated.Update(branchesResultMsg{err: errors.New("fail")})
+	updated = next.(tuiModel)
 	if updated.status == "" {
 		t.Fatalf("expected status error")
+	}
+	if updated.state != tuiStateList {
+		t.Fatalf("expected list state after error")
 	}
 }
 
 func TestTUIBranchNoBranches(t *testing.T) {
-	oldExec := execCommand
-	defer func() { execCommand = oldExec }()
-
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		if len(args) > 0 && args[0] == "-C" {
-			args = args[2:]
-		}
-		if len(args) >= 2 && args[0] == "branch" {
-			return cmdWithOutput("")
-		}
-		return exec.Command("sh", "-c", "exit 0")
-	}
 	model := tuiModel{
 		state:    tuiStateList,
 		repoRoot: "/repo",
 		list:     newListModel("Worktrees", nil),
 	}
+	// Press 'n' - goes to busy state
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	updated := next.(tuiModel)
+	if updated.state != tuiStateBusy {
+		t.Fatalf("expected busy state")
+	}
+	// Simulate empty branches result
+	next, _ = updated.Update(branchesResultMsg{branches: nil})
+	updated = next.(tuiModel)
 	if updated.status != "no branches found" {
 		t.Fatalf("unexpected status: %q", updated.status)
 	}
@@ -1152,31 +1156,21 @@ func TestTUIBranchListUpdateFilterInput(t *testing.T) {
 }
 
 func TestTUIBranchCreateFlow(t *testing.T) {
-	repo := t.TempDir()
-
-	oldExec := execCommand
-	defer func() { execCommand = oldExec }()
-
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		if len(args) > 0 && args[0] == "-C" {
-			args = args[2:]
-		}
-		if len(args) >= 2 && args[0] == "branch" {
-			return cmdWithOutput("main\nfeature")
-		}
-		return exec.Command("sh", "-c", "exit 0")
-	}
-
 	model := tuiModel{
 		state:    tuiStateList,
-		repoRoot: repo,
+		repoRoot: "/repo",
 		list:     newListModel("Worktrees", nil),
 		width:    100,
 		height:   40,
 	}
-	// Go to branch list
+	// Go to branch list (async)
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	updated := next.(tuiModel)
+	if updated.state != tuiStateBusy {
+		t.Fatalf("expected busy state")
+	}
+	next, _ = updated.Update(branchesResultMsg{branches: []string{"main", "feature"}})
+	updated = next.(tuiModel)
 	if updated.state != tuiStateNewBranch {
 		t.Fatalf("expected branch selection state")
 	}
@@ -1587,5 +1581,362 @@ func TestTUIUpdateDefaultState(t *testing.T) {
 	updated := next.(tuiModel)
 	if updated.state != tuiState(99) {
 		t.Fatalf("expected state unchanged")
+	}
+}
+
+func TestTUIQuitBlockedDuringListFilter(t *testing.T) {
+	model := tuiModel{
+		state:    tuiStateList,
+		repoRoot: "/repo",
+		list:     newListModel("Worktrees", []list.Item{worktreeItem{branch: "main", path: "/repo"}}),
+	}
+	// Enter filter mode
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := next.(tuiModel)
+	if updated.list.FilterState() != list.Filtering {
+		t.Fatalf("expected filtering state")
+	}
+	// Press 'q' - should type into filter, not quit
+	next, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	updated = next.(tuiModel)
+	if updated.state != tuiStateList {
+		t.Fatalf("expected list state (not quit)")
+	}
+	if updated.list.FilterValue() != "q" {
+		t.Fatalf("expected filter value 'q', got %q", updated.list.FilterValue())
+	}
+}
+
+func TestTUIQuitBlockedDuringBranchFilter(t *testing.T) {
+	model := tuiModel{
+		state:    tuiStateNewBranch,
+		repoRoot: "/repo",
+		branches: newListModel("Select branch", []list.Item{branchItem("main")}),
+	}
+	// Enter filter mode
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := next.(tuiModel)
+	if updated.branches.FilterState() != list.Filtering {
+		t.Fatalf("expected filtering state")
+	}
+	// Press 'q' - should type into filter, not quit
+	next, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	updated = next.(tuiModel)
+	if updated.state != tuiStateNewBranch {
+		t.Fatalf("expected branch state (not quit)")
+	}
+}
+
+func TestTUIQuitBlockedDuringInput(t *testing.T) {
+	model := tuiModel{
+		state:      tuiStateInputBranchName,
+		baseBranch: "main",
+	}
+	// Press 'q' - should type into input, not quit
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	updated := next.(tuiModel)
+	if updated.state != tuiStateInputBranchName {
+		t.Fatalf("expected input state (not quit)")
+	}
+}
+
+func TestTUIHelpToggle(t *testing.T) {
+	model := tuiModel{
+		state:    tuiStateList,
+		repoRoot: "/repo",
+		list:     newListModel("Worktrees", []list.Item{worktreeItem{branch: "main", path: "/repo"}}),
+	}
+	// Press '?' to open help
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	updated := next.(tuiModel)
+	if updated.state != tuiStateHelp {
+		t.Fatalf("expected help state")
+	}
+	// Verify help view has content
+	view := updated.View()
+	if !strings.Contains(view, "Keyboard Shortcuts") {
+		t.Fatalf("expected help content in view")
+	}
+	// Press any key to dismiss help
+	next, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	updated = next.(tuiModel)
+	if updated.state != tuiStateList {
+		t.Fatalf("expected list state after dismissing help")
+	}
+}
+
+func TestTUIHelpFromBranchList(t *testing.T) {
+	model := tuiModel{
+		state:    tuiStateNewBranch,
+		repoRoot: "/repo",
+		branches: newListModel("Select branch", []list.Item{branchItem("main")}),
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	updated := next.(tuiModel)
+	if updated.state != tuiStateHelp {
+		t.Fatalf("expected help state")
+	}
+}
+
+func TestTUIHelpNonKey(t *testing.T) {
+	model := tuiModel{state: tuiStateHelp}
+	next, _ := model.Update(spinner.TickMsg{})
+	updated := next.(tuiModel)
+	if updated.state != tuiStateHelp {
+		t.Fatalf("expected help state unchanged")
+	}
+}
+
+func TestHelpContent(t *testing.T) {
+	content := helpContent()
+	if !strings.Contains(content, "Keyboard Shortcuts") {
+		t.Fatalf("expected help content")
+	}
+	if !strings.Contains(content, "enter") || !strings.Contains(content, "Quit") {
+		t.Fatalf("expected key bindings in help")
+	}
+}
+
+func TestIsFiltering(t *testing.T) {
+	model := tuiModel{
+		state:    tuiStateList,
+		list:     newListModel("Worktrees", []list.Item{worktreeItem{branch: "main", path: "/repo"}}),
+		branches: newListModel("Select branch", []list.Item{branchItem("main")}),
+	}
+	if model.isFiltering() {
+		t.Fatalf("expected not filtering initially")
+	}
+	// Enter filter mode on list
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := next.(tuiModel)
+	if !updated.isFiltering() {
+		t.Fatalf("expected filtering in list state")
+	}
+	// Check branch list filtering
+	model.state = tuiStateNewBranch
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated = next.(tuiModel)
+	if !updated.isFiltering() {
+		t.Fatalf("expected filtering in branch state")
+	}
+	// Other states should not be filtering
+	model.state = tuiStatePromptConfig
+	if model.isFiltering() {
+		t.Fatalf("expected not filtering in prompt state")
+	}
+}
+
+func TestBranchesResultMsg(t *testing.T) {
+	model := tuiModel{
+		state:    tuiStateBusy,
+		repoRoot: "/repo",
+		list:     newListModel("Worktrees", nil),
+		width:    100,
+		height:   40,
+	}
+	// Success with branches
+	next, _ := model.Update(branchesResultMsg{branches: []string{"main", "dev"}})
+	updated := next.(tuiModel)
+	if updated.state != tuiStateNewBranch {
+		t.Fatalf("expected branch state, got %v", updated.state)
+	}
+	if len(updated.branches.Items()) != 2 {
+		t.Fatalf("expected 2 branch items")
+	}
+}
+
+func TestBranchesResultMsgNoSize(t *testing.T) {
+	model := tuiModel{
+		state:    tuiStateBusy,
+		repoRoot: "/repo",
+		list:     newListModel("Worktrees", nil),
+	}
+	next, _ := model.Update(branchesResultMsg{branches: []string{"main"}})
+	updated := next.(tuiModel)
+	if updated.state != tuiStateNewBranch {
+		t.Fatalf("expected branch state")
+	}
+}
+
+func TestLoadBranchesCmd(t *testing.T) {
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "branch" {
+			return cmdWithOutput("main\nfeature")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	cmd := loadBranchesCmd("/repo")
+	msg := cmd()
+	result, ok := msg.(branchesResultMsg)
+	if !ok {
+		t.Fatalf("expected branchesResultMsg")
+	}
+	if result.err != nil {
+		t.Fatalf("unexpected error: %v", result.err)
+	}
+	if len(result.branches) == 0 {
+		t.Fatalf("expected branches")
+	}
+}
+
+func TestLoadBranchesCmdError(t *testing.T) {
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 1")
+	}
+
+	cmd := loadBranchesCmd("/repo")
+	msg := cmd()
+	result, ok := msg.(branchesResultMsg)
+	if !ok {
+		t.Fatalf("expected branchesResultMsg")
+	}
+	if result.err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestReloadWorktreesRecalculatesSize(t *testing.T) {
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+
+	out := strings.Join([]string{
+		"worktree /repo",
+		"branch refs/heads/main",
+		"",
+	}, "\n")
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return cmdWithOutput(out)
+	}
+	model := tuiModel{
+		repoRoot: "/repo",
+		list:     newListModel("Worktrees", nil),
+		width:    100,
+		height:   40,
+	}
+	if err := model.reloadWorktrees(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(model.list.Items()) != 1 {
+		t.Fatalf("expected items to load")
+	}
+}
+
+func TestTUIStatusClearedOnDelete(t *testing.T) {
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "status" {
+			return cmdWithOutput("")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	model := tuiModel{
+		state:    tuiStateList,
+		repoRoot: "/repo",
+		list:     newListModel("Worktrees", []list.Item{worktreeItem{branch: "main", path: "/repo"}}),
+		status:   "worktree created",
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	updated := next.(tuiModel)
+	if updated.state != tuiStateConfirmDelete {
+		t.Fatalf("expected confirm delete state")
+	}
+	if updated.status != "" {
+		t.Fatalf("expected status cleared, got %q", updated.status)
+	}
+}
+
+func TestTUIDeletePromptShowsBranch(t *testing.T) {
+	model := tuiModel{
+		state:         tuiStateConfirmDelete,
+		pendingDelete: worktreeItem{branch: "feature", path: "/repo/feature"},
+	}
+	view := model.View()
+	if !strings.Contains(view, "feature") {
+		t.Fatalf("expected branch name in delete prompt, got %q", view)
+	}
+}
+
+func TestTUIDeletePromptShowsPathFallback(t *testing.T) {
+	model := tuiModel{
+		state:         tuiStateConfirmDelete,
+		pendingDelete: worktreeItem{path: "/repo/my-work"},
+	}
+	view := model.View()
+	if !strings.Contains(view, "my-work") {
+		t.Fatalf("expected path basename in delete prompt, got %q", view)
+	}
+}
+
+func TestTUIWindowSizeCapsList(t *testing.T) {
+	model := tuiModel{
+		state: tuiStateList,
+		list:  newListModel("Worktrees", []list.Item{worktreeItem{branch: "main", path: "/repo"}}),
+	}
+	// With 1 item and 40-line terminal, list should be capped
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	updated := next.(tuiModel)
+	if updated.width != 100 || updated.height != 40 {
+		t.Fatalf("expected dimensions stored")
+	}
+}
+
+func TestTUIWindowSizeCapsBranches(t *testing.T) {
+	model := tuiModel{
+		state:    tuiStateNewBranch,
+		branches: newListModel("Select branch", []list.Item{branchItem("main"), branchItem("dev")}),
+	}
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	updated := next.(tuiModel)
+	if updated.width != 100 || updated.height != 40 {
+		t.Fatalf("expected dimensions stored")
+	}
+}
+
+func TestRunTUIInterrupt(t *testing.T) {
+	oldProgram := newProgram
+	oldExec := execCommand
+	defer func() {
+		newProgram = oldProgram
+		execCommand = oldExec
+	}()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-C" {
+			args = args[2:]
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" {
+			return cmdWithOutput("/repo")
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+			return cmdWithOutput("worktree /repo\nbranch refs/heads/main\n")
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+	newProgram = func(model tea.Model, opts ...tea.ProgramOption) programRunner {
+		return stubProgram{err: tea.ErrProgramKilled}
+	}
+
+	action, err := runTUI()
+	if err != nil {
+		t.Fatalf("expected nil error for interrupt, got %v", err)
+	}
+	if action.kind != tuiActionNone {
+		t.Fatalf("expected no action for interrupt")
 	}
 }
