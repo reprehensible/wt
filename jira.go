@@ -228,9 +228,13 @@ func jiraSetStatus(baseURL, issueKey, statusName, user, token string) error {
 
 func jiraCmd(args []string) {
 	if len(args) == 0 {
-		die(errors.New("usage: wt jira <new|status|config> ..."))
+		printJiraUsage()
+		exitFunc(1)
+		return
 	}
 	switch args[0] {
+	case "-h", "--help", "help":
+		printJiraUsage()
 	case "new":
 		jiraNewCmd(args[1:])
 	case "status":
@@ -244,6 +248,7 @@ func jiraCmd(args []string) {
 
 func jiraNewCmd(args []string) {
 	fs := flag.NewFlagSet("jira new", flag.ExitOnError)
+	fs.Usage = printJiraNewUsage
 	tmux := fs.Bool("t", false, "open worktree in tmux after creation")
 	branch := fs.String("branch", "", "override branch name")
 	fs.StringVar(branch, "b", "", "override branch name")
@@ -266,7 +271,11 @@ func jiraNewCmd(args []string) {
 		issueKey = fs.Arg(0)
 	}
 	if issueKey == "" {
-		die(errors.New("issue key required (e.g. PROJ-123)"))
+		fmt.Fprintln(stderr, "error: issue key required (e.g. PROJ-123)")
+		fmt.Fprintln(stderr, "")
+		printJiraNewUsage()
+		exitFunc(1)
+		return
 	}
 
 	baseURL, user, token, err := jiraEnv()
@@ -341,6 +350,10 @@ func jiraNewCmd(args []string) {
 func jiraStatusCmd(args []string) {
 	if len(args) > 0 && args[0] == "sync" {
 		jiraStatusSyncCmd(args[1:])
+		return
+	}
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
+		printJiraStatusUsage()
 		return
 	}
 
@@ -420,6 +433,7 @@ func jiraStatusCmd(args []string) {
 
 func jiraStatusSyncCmd(args []string) {
 	fs := flag.NewFlagSet("jira status sync", flag.ExitOnError)
+	fs.Usage = printJiraStatusUsage
 	dryRun := fs.Bool("dry-run", false, "show what would happen without making changes")
 	fs.BoolVar(dryRun, "n", false, "dry run")
 	_ = fs.Parse(args)
@@ -489,6 +503,7 @@ func jiraStatusSyncCmd(args []string) {
 
 func jiraConfigCmd(args []string) {
 	fs := flag.NewFlagSet("jira config", flag.ExitOnError)
+	fs.Usage = printJiraConfigUsage
 	initFlag := fs.Bool("init", false, "bootstrap a template config")
 	_ = fs.Parse(args)
 

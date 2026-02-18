@@ -7,45 +7,113 @@ import (
 )
 
 func printUsage() {
-	fmt.Fprintln(stderr, "usage: wt <command> [options]")
+	fmt.Fprintln(stderr, "wt - manage git worktrees")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "usage: wt [command] [options]")
 	fmt.Fprintln(stderr, "")
 	fmt.Fprintln(stderr, "commands:")
-	fmt.Fprintln(stderr, "  (no command)    open interactive worktree manager")
-	fmt.Fprintln(stderr, "  new [branch]    create a new worktree")
-	fmt.Fprintln(stderr, "  list            list worktrees")
-	fmt.Fprintln(stderr, "  go [name]        enter a worktree shell")
-	fmt.Fprintln(stderr, "  t [name]         open worktree in tmux session")
-	fmt.Fprintln(stderr, "  jira new [key]     create worktree from Jira issue")
-	fmt.Fprintln(stderr, "  jira status [key]  view/update Jira issue status")
-	fmt.Fprintln(stderr, "  jira status sync   sync Jira status from GitHub PR state")
-	fmt.Fprintln(stderr, "  jira config [key]  show status mappings")
-	fmt.Fprintln(stderr, "  jira config --init bootstrap a template config")
+	fmt.Fprintln(stderr, "  (no command)        open interactive worktree manager")
+	fmt.Fprintln(stderr, "  new <branch>        create a new worktree")
+	fmt.Fprintln(stderr, "  list                list worktrees")
+	fmt.Fprintln(stderr, "  go <name>           enter a worktree shell")
+	fmt.Fprintln(stderr, "  t <name>            open worktree in tmux session")
 	fmt.Fprintln(stderr, "")
-	fmt.Fprintln(stderr, "new options:")
-	fmt.Fprintln(stderr, "  -c, --copy-config     copy config files (default)")
-	fmt.Fprintln(stderr, "  -C, --no-copy-config  skip copying config files")
-	fmt.Fprintln(stderr, "  -l, --copy-libs       copy libraries (default: off)")
-	fmt.Fprintln(stderr, "  -L, --no-copy-libs    skip copying libraries")
-	fmt.Fprintln(stderr, "  -f, --from            base branch to create from")
+	fmt.Fprintln(stderr, "  jira new <key>      create worktree from Jira issue")
+	fmt.Fprintln(stderr, "  jira status [key]   view/update Jira issue status")
+	fmt.Fprintln(stderr, "  jira config         show/init status mappings")
 	fmt.Fprintln(stderr, "")
-	fmt.Fprintln(stderr, "jira new options:")
-	fmt.Fprintln(stderr, "  -t                    open worktree in tmux after creation")
-	fmt.Fprintln(stderr, "  -b, --branch          override auto-generated branch name")
-	fmt.Fprintln(stderr, "  -c, --copy-config     copy config files (default)")
-	fmt.Fprintln(stderr, "  -C, --no-copy-config  skip copying config files")
-	fmt.Fprintln(stderr, "  -l, --copy-libs       copy libraries (default: off)")
-	fmt.Fprintln(stderr, "  -L, --no-copy-libs    skip copying libraries")
-	fmt.Fprintln(stderr, "  -f, --from            base branch to create from")
+	fmt.Fprintln(stderr, "Run 'wt <command> --help' for details on a specific command.")
+}
+
+func printNewUsage() {
+	fmt.Fprintln(stderr, "usage: wt new [options] <branch>")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "Create a new worktree for the given branch.")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "options:")
+	fmt.Fprintln(stderr, "  -c, --copy-config      copy config files (default: on)")
+	fmt.Fprintln(stderr, "  -C, --no-copy-config   skip copying config files")
+	fmt.Fprintln(stderr, "  -l, --copy-libs        copy library directories")
+	fmt.Fprintln(stderr, "  -L, --no-copy-libs     skip copying libraries (default)")
+	fmt.Fprintln(stderr, "  -f, --from <branch>    base branch to create from")
+}
+
+func printListUsage() {
+	fmt.Fprintln(stderr, "usage: wt list")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "List all worktrees with their branch names and paths.")
+}
+
+func printGoUsage() {
+	fmt.Fprintln(stderr, "usage: wt go <name>")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "Open a shell in the named worktree. Matches against branch")
+	fmt.Fprintln(stderr, "names and directory basenames.")
+}
+
+func printTmuxUsage() {
+	fmt.Fprintln(stderr, "usage: wt t <name>")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "Open the named worktree in a tmux session.")
+}
+
+func printJiraUsage() {
+	fmt.Fprintln(stderr, "usage: wt jira <new|status|config> [options]")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "Jira integration for worktree management.")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "subcommands:")
+	fmt.Fprintln(stderr, "  new <key>           create worktree from Jira issue")
+	fmt.Fprintln(stderr, "  status [key]        view/update Jira issue status")
+	fmt.Fprintln(stderr, "  status sync         sync Jira status from GitHub PR state")
+	fmt.Fprintln(stderr, "  config              show status mappings")
+	fmt.Fprintln(stderr, "  config --init       bootstrap a template config")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "environment variables: JIRA_URL, JIRA_USER, JIRA_TOKEN")
+}
+
+func printJiraNewUsage() {
+	fmt.Fprintln(stderr, "usage: wt jira new [options] <key>")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "Create a worktree from a Jira issue. The branch name is")
+	fmt.Fprintln(stderr, "generated from the issue key and summary.")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "options:")
+	fmt.Fprintln(stderr, "  -t                     open worktree in tmux after creation")
+	fmt.Fprintln(stderr, "  -b, --branch <name>    override auto-generated branch name")
+	fmt.Fprintln(stderr, "  -c, --copy-config      copy config files (default: on)")
+	fmt.Fprintln(stderr, "  -C, --no-copy-config   skip copying config files")
+	fmt.Fprintln(stderr, "  -l, --copy-libs        copy library directories")
+	fmt.Fprintln(stderr, "  -L, --no-copy-libs     skip copying libraries (default)")
+	fmt.Fprintln(stderr, "  -f, --from <branch>    base branch to create from")
 	fmt.Fprintln(stderr, "  -S, --no-status-update skip auto-transition to working")
 	fmt.Fprintln(stderr, "")
-	fmt.Fprintln(stderr, "jira status sync options:")
-	fmt.Fprintln(stderr, "  -n, --dry-run         show what would happen without making changes")
+	fmt.Fprintln(stderr, "environment variables: JIRA_URL, JIRA_USER, JIRA_TOKEN")
+}
+
+func printJiraStatusUsage() {
+	fmt.Fprintln(stderr, "usage: wt jira status [key] [status]")
 	fmt.Fprintln(stderr, "")
-	fmt.Fprintln(stderr, "jira env vars: JIRA_URL, JIRA_USER, JIRA_TOKEN")
+	fmt.Fprintln(stderr, "View or update a Jira issue's status. If no key is given,")
+	fmt.Fprintln(stderr, "the issue key is inferred from the current branch name.")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "subcommands:")
+	fmt.Fprintln(stderr, "  sync                sync status from GitHub PR state")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "sync options:")
+	fmt.Fprintln(stderr, "  -n, --dry-run       show what would happen without making changes")
+}
+
+func printJiraConfigUsage() {
+	fmt.Fprintln(stderr, "usage: wt jira config [--init]")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "Show current Jira status mappings, or bootstrap a template")
+	fmt.Fprintln(stderr, "config file with --init.")
 }
 
 func newCmd(args []string) {
 	fs := flag.NewFlagSet("new", flag.ExitOnError)
+	fs.Usage = printNewUsage
 	copyConfig := fs.Bool("copy-config", true, "copy config files")
 	fs.BoolVar(copyConfig, "c", true, "copy config files")
 	noCopyConfig := fs.Bool("no-copy-config", false, "skip copying config files")
@@ -63,7 +131,11 @@ func newCmd(args []string) {
 		branch = fs.Arg(0)
 	}
 	if branch == "" {
-		die(errors.New("branch required"))
+		fmt.Fprintln(stderr, "error: branch required")
+		fmt.Fprintln(stderr, "")
+		printNewUsage()
+		exitFunc(1)
+		return
 	}
 
 	if *noCopyConfig {
@@ -91,6 +163,12 @@ func newCmd(args []string) {
 }
 
 func listCmd(args []string) {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			printListUsage()
+			return
+		}
+	}
 	if len(args) > 0 {
 		die(errors.New("list does not take arguments"))
 	}
@@ -116,6 +194,7 @@ func listCmd(args []string) {
 
 func goCmd(args []string) {
 	fs := flag.NewFlagSet("go", flag.ExitOnError)
+	fs.Usage = printGoUsage
 	_ = fs.Parse(args)
 
 	name := ""
@@ -123,7 +202,11 @@ func goCmd(args []string) {
 		name = fs.Arg(0)
 	}
 	if name == "" {
-		die(errors.New("worktree required"))
+		fmt.Fprintln(stderr, "error: worktree name required")
+		fmt.Fprintln(stderr, "")
+		printGoUsage()
+		exitFunc(1)
+		return
 	}
 
 	repoRoot, err := gitRepoRoot()
@@ -143,6 +226,7 @@ func goCmd(args []string) {
 
 func tmuxCmd(args []string) {
 	fs := flag.NewFlagSet("t", flag.ExitOnError)
+	fs.Usage = printTmuxUsage
 	_ = fs.Parse(args)
 
 	name := ""
@@ -150,7 +234,11 @@ func tmuxCmd(args []string) {
 		name = fs.Arg(0)
 	}
 	if name == "" {
-		die(errors.New("worktree required"))
+		fmt.Fprintln(stderr, "error: worktree name required")
+		fmt.Fprintln(stderr, "")
+		printTmuxUsage()
+		exitFunc(1)
+		return
 	}
 
 	repoRoot, err := gitRepoRoot()
