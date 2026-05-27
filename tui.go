@@ -121,15 +121,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tuiStateList:
 			// Reserve: frame(2) + title(1) + column header(1) + footer(1) + status(1)
 			innerH := msg.Height - 6
-			if nItems := len(m.list.Items()); nItems+2 < innerH {
-				innerH = nItems + 2
+			// +4 reserves the list's own chrome (blank title line, status
+			// bar, and paginator with its top margin) so few items stay on
+			// a single page instead of paginating.
+			if nItems := len(m.list.Items()); nItems+4 < innerH {
+				innerH = nItems + 4
 			}
 			m.list.SetSize(innerW, innerH)
 		case tuiStateNewBranch:
 			// Reserve: frame(2) + title(1) + footer(1) + status(1)
 			innerH := msg.Height - 5
-			if nItems := len(m.branches.Items()); nItems+2 < innerH {
-				innerH = nItems + 2
+			if nItems := len(m.branches.Items()); nItems+4 < innerH {
+				innerH = nItems + 4
 			}
 			m.branches.SetSize(innerW, innerH)
 		}
@@ -193,8 +196,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.branches = newListModel("Select branch", items)
 		if m.width > 0 && m.height > 0 {
 			innerH := m.height - 5
-			if nItems := len(msg.branches); nItems+2 < innerH {
-				innerH = nItems + 2
+			if nItems := len(msg.branches); nItems+4 < innerH {
+				innerH = nItems + 4
 			}
 			m.branches.SetSize(m.width-2, innerH)
 		}
@@ -519,8 +522,8 @@ func (m *tuiModel) reloadWorktrees() error {
 	m.maxBranchLen = maxLen
 	if m.width > 0 && m.height > 0 {
 		innerH := m.height - 6
-		if nItems := len(items); nItems+2 < innerH {
-			innerH = nItems + 2
+		if nItems := len(items); nItems+4 < innerH {
+			innerH = nItems + 4
 		}
 		m.list.SetSize(m.width-2, innerH)
 	}

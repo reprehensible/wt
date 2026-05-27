@@ -322,6 +322,21 @@ func TestNewListModel(t *testing.T) {
 	}
 }
 
+func TestTUIListFitsOnSinglePage(t *testing.T) {
+	items := []list.Item{
+		worktreeItem{branch: "main", path: "/repo"},
+		worktreeItem{branch: "dev", path: "/repo-dev"},
+		worktreeItem{branch: "feat", path: "/repo-feat"},
+		worktreeItem{branch: "fix", path: "/repo-fix"},
+	}
+	model := tuiModel{state: tuiStateList, list: newListModel("Worktrees", items)}
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 80})
+	updated := next.(tuiModel)
+	if pages := updated.list.Paginator.TotalPages; pages != 1 {
+		t.Fatalf("expected 4 worktrees to fit on a single page on an 80-line terminal, got %d pages (PerPage=%d)", pages, updated.list.Paginator.PerPage)
+	}
+}
+
 func TestTUIListCommandsBlockedDuringFilter(t *testing.T) {
 	model := tuiModel{
 		state:    tuiStateList,
